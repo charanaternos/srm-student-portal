@@ -28,21 +28,28 @@ import com.google.gson.annotations.SerializedName
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import okhttp3.Dns
+import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
+import java.io.File
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 // =========================================================================
-// 1. SUPABASE DEFAULT CONFIGURATION
-// (Set your Supabase project URL and anon public key here, or configure them
-// directly in the app's settings dialog without rebuilding).
+// 1. PRIMARY & FALLBACK URL CONFIGURATION
+// (Paste your project credentials below, or configure them directly inside the
+// app using the ⚙️ Server Configuration button).
 // =========================================================================
 private const val DEFAULT_SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co/"
-private const val DEFAULT_SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_PUBLIC_KEY"
 
-// If you log in with a Student ID (like RA2111003010000) instead of an email,
-// this domain is appended automatically for Supabase Auth:
+// Optional Cloudflare Worker relay URL if SRM Wi-Fi blocks supabase.co:
+private const val DEFAULT_FALLBACK_GATEWAY_URL = "https://YOUR_WORKER.workers.dev/"
+
+private const val DEFAULT_SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_PUBLIC_KEY"
 private const val DEFAULT_EMAIL_DOMAIN = "@srmist.edu.in"
 
 // =========================================================================
@@ -110,28 +117,154 @@ interface SupabaseApi {
     ): List<SnapshotRow>
 }
 
+// =========================================================================
+// 3. RESILIENT NETWORK CLIENT (IPv4-FIRST + AUTOMATIC FAILOVER)
+// =========================================================================
 private object ApiClient {
-    private var cachedUrl: String? = null
-    private var cachedApi: SupabaseApi? = null
-
-    fun get(baseUrl: String): SupabaseApi {
-        val cleanUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
-        if (cachedUrl == cleanUrl && cachedApi != null) {
-            return cachedApi!!
+    // Campus Wi-Fi networks often have broken IPv6 routing that causes 30s hangs.
+    // Preferring IPv4 makes connections on campus Wi-Fi complete in milliseconds.
+    private val ipv4FirstDns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            return Dns.SYSTEM.lookup(hostname).sortedBy { address ->
+                if (address is Inet4Address) 0 else 1
+            }
         }
-        val api = Retrofit.Builder()
-            .baseUrl(cleanUrl)
-            .addConverterFactory(GsonConverterFactory.create())
+    }
+
+    private val okHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(ipv4FirstDns)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
-            .create(SupabaseApi::class.java)
-        cachedUrl = cleanUrl
-        cachedApi = api
-        return api
+    }
+
+    private val apiCache = mutableMapOf<String, SupabaseApi>()
+
+    fun buildApi(baseUrl: String): SupabaseApi {
+        val cleanUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
+        return apiCache.getOrPut(cleanUrl) {
+            Retrofit.Builder()
+                .baseUrl(cleanUrl)
+                .client(okHttpClient)
+                .addConverterFactory(GsonConverterFactory.create())
+                .build()
+                .create(SupabaseApi::class.java)
+        }
+    }
+
+    // Automatically tries Primary URL first, then switches to Fallback Gateway
+    // if SRM Wi-Fi or the ISP blocks direct connections to supabase.co.
+    suspend fun <T> callWithFailover(
+        primaryUrl: String,
+        fallbackUrl: String?,
+        block: suspend (SupabaseApi) -> T
+    ): T {
+        val primaryApi = buildApi(primaryUrl)
+        return try {
+            block(primaryApi)
+        } catch (primaryError: Exception) {
+            if (!fallbackUrl.isNullOrBlank() &&
+                fallbackUrl.startsWith("https://") &&
+                !fallbackUrl.contains("YOUR_WORKER") &&
+                fallbackUrl != primaryUrl
+            ) {
+                val fallbackApi = buildApi(fallbackUrl)
+                block(fallbackApi)
+            } else {
+                throw primaryError
+            }
+        }
     }
 }
 
 // =========================================================================
-// 3. APP DOMAIN MODELS & FLEXIBLE JSON PARSER
+// 4. LOCAL OFFLINE CACHE (WORKS EVEN WHEN SRM WI-FI BLOCKS ALL INTERNET)
+// =========================================================================
+private object LocalPortalCache {
+    private const val PREFS_NAME = "srm_portal_session"
+    private const val KEY_IDENTIFIER = "student_identifier"
+    private const val KEY_USER_UUID = "user_uuid"
+    private const val KEY_ACCESS_TOKEN = "access_token"
+    private const val KEY_SUPABASE_URL = "supabase_url"
+    private const val KEY_FALLBACK_URL = "fallback_url"
+    private const val KEY_ANON_KEY = "anon_key"
+    private const val CACHE_FILE_NAME = "cached_snapshot.json"
+    private val gson = Gson()
+
+    fun saveConfig(context: Context, supabaseUrl: String, fallbackUrl: String, anonKey: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_SUPABASE_URL, supabaseUrl)
+            .putString(KEY_FALLBACK_URL, fallbackUrl)
+            .putString(KEY_ANON_KEY, anonKey)
+            .apply()
+    }
+
+    fun getSupabaseUrl(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_SUPABASE_URL, DEFAULT_SUPABASE_URL) ?: DEFAULT_SUPABASE_URL
+
+    fun getFallbackUrl(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_FALLBACK_URL, DEFAULT_FALLBACK_GATEWAY_URL) ?: DEFAULT_FALLBACK_GATEWAY_URL
+
+    fun getAnonKey(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_ANON_KEY, DEFAULT_SUPABASE_ANON_KEY) ?: DEFAULT_SUPABASE_ANON_KEY
+
+    fun saveSession(context: Context, identifier: String, userUuid: String?, token: String?) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_IDENTIFIER, identifier)
+            .putString(KEY_USER_UUID, userUuid)
+            .putString(KEY_ACCESS_TOKEN, token)
+            .apply()
+    }
+
+    fun getSavedIdentifier(context: Context): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_IDENTIFIER, null)
+
+    fun getSavedUuid(context: Context): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_USER_UUID, null)
+
+    fun getSavedToken(context: Context): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_ACCESS_TOKEN, null)
+
+    fun saveSnapshot(context: Context, row: SnapshotRow) {
+        runCatching {
+            val file = File(context.filesDir, CACHE_FILE_NAME)
+            file.writeText(gson.toJson(row), Charsets.UTF_8)
+        }
+    }
+
+    fun loadSnapshot(context: Context): PortalSnapshotUiData? {
+        return runCatching {
+            val file = File(context.filesDir, CACHE_FILE_NAME)
+            if (!file.exists()) return null
+            val row = gson.fromJson(file.readText(Charsets.UTF_8), SnapshotRow::class.java)
+            parseSnapshotRow(row)
+        }.getOrNull()
+    }
+
+    fun clearAll(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val url = prefs.getString(KEY_SUPABASE_URL, DEFAULT_SUPABASE_URL)
+        val fallback = prefs.getString(KEY_FALLBACK_URL, DEFAULT_FALLBACK_GATEWAY_URL)
+        val key = prefs.getString(KEY_ANON_KEY, DEFAULT_SUPABASE_ANON_KEY)
+        prefs.edit().clear().apply()
+        saveConfig(context, url ?: DEFAULT_SUPABASE_URL, fallback ?: DEFAULT_FALLBACK_GATEWAY_URL, key ?: DEFAULT_SUPABASE_ANON_KEY)
+        runCatching { File(context.filesDir, CACHE_FILE_NAME).delete() }
+    }
+}
+
+// =========================================================================
+// 5. APP DOMAIN MODELS & FLEXIBLE JSON PARSER
 // =========================================================================
 data class PortalClassItem(
     val subject: String,
@@ -202,7 +335,6 @@ private fun String?.toDoubleSafe(): Double? =
 private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
     val root = row.data ?: JsonObject()
 
-    // Extract Day Order if present
     val dayOrder = root.findString("day_order", "dayorder", "dayOrder")
         ?: root.getAsJsonArray("day_order_mapping")
             ?.firstOrNull()
@@ -234,7 +366,7 @@ private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
         PortalClassItem(subject = subject, code = code, day = day, date = date, time = time, room = room)
     } ?: emptyList()
 
-    // 2. Parse Attendance (Supports both standard keys and SRM table headers)
+    // 2. Parse Attendance
     val attendanceArray = root.getAsJsonArray("attendance")
     val attendance = attendanceArray?.mapNotNull { element ->
         if (!element.isJsonObject) return@mapNotNull null
@@ -302,7 +434,6 @@ private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
                 rawScoreText = "${obtained.toString().removeSuffix(".0")}/${total.toString().removeSuffix(".0")}"
             )
         } else {
-            // Fallback if SRM formats marks like "FT-I / 5.00 : 4.50"
             PortalMarkItem(
                 subject = subject,
                 assessment = assessment,
@@ -323,7 +454,7 @@ private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
 }
 
 // =========================================================================
-// 4. UI STATE & MAIN APP COMPOSABLE
+// 6. UI STATE & MAIN APP COMPOSABLE
 // =========================================================================
 private enum class AppTab(val label: String, val symbol: String) {
     Home("Home", "⌂"),
@@ -350,77 +481,80 @@ private fun PortalTheme(content: @Composable () -> Unit) {
 @Composable
 fun StudentPortalApp() {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("srm_portal_settings", Context.MODE_PRIVATE) }
 
-    var supabaseUrl by remember {
-        mutableStateOf(prefs.getString("supabase_url", DEFAULT_SUPABASE_URL) ?: DEFAULT_SUPABASE_URL)
-    }
-    var supabaseAnonKey by remember {
-        mutableStateOf(prefs.getString("supabase_anon_key", DEFAULT_SUPABASE_ANON_KEY) ?: DEFAULT_SUPABASE_ANON_KEY)
-    }
+    var supabaseUrl by remember { mutableStateOf(LocalPortalCache.getSupabaseUrl(context)) }
+    var fallbackUrl by remember { mutableStateOf(LocalPortalCache.getFallbackUrl(context)) }
+    var supabaseAnonKey by remember { mutableStateOf(LocalPortalCache.getAnonKey(context)) }
 
-    var accessToken by remember { mutableStateOf<String?>(prefs.getString("cached_access_token", null)) }
-    var loggedInIdentifier by remember { mutableStateOf(prefs.getString("cached_identifier", "") ?: "") }
-    var loggedInUserId by remember { mutableStateOf<String?>(prefs.getString("cached_user_uuid", null)) }
+    // Load saved student session and offline cached snapshot immediately on launch
+    var isSignedIn by remember { mutableStateOf(LocalPortalCache.getSavedIdentifier(context) != null) }
+    var loggedInIdentifier by remember { mutableStateOf(LocalPortalCache.getSavedIdentifier(context) ?: "") }
+    var loggedInUserId by remember { mutableStateOf(LocalPortalCache.getSavedUuid(context)) }
+    var accessToken by remember { mutableStateOf(LocalPortalCache.getSavedToken(context)) }
 
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    // Load cached snapshot data on launch for instant offline support
-    var portalData by remember {
-        mutableStateOf<PortalSnapshotUiData?>(
-            prefs.getString("cached_snapshot_json", null)?.let { json ->
-                try {
-                    val row = Gson().fromJson(json, SnapshotRow::class.java)
-                    parseSnapshotRow(row)
-                } catch (_: Exception) { null }
-            }
-        )
-    }
+    var portalData by remember { mutableStateOf(LocalPortalCache.loadSnapshot(context)) }
 
     val scope = rememberCoroutineScope()
 
-    fun fetchPortalSnapshot(token: String) {
+    fun fetchPortalSnapshot(tokenToUse: String?) {
         scope.launch {
             isLoading = true
             errorMessage = null
+            val bearer = tokenToUse ?: supabaseAnonKey
             try {
-                val api = ApiClient.get(supabaseUrl)
-                val rows = api.getLatestSnapshot(
-                    apiKey = supabaseAnonKey,
-                    bearerToken = "Bearer $token"
-                )
+                val rows = ApiClient.callWithFailover(
+                    primaryUrl = supabaseUrl,
+                    fallbackUrl = fallbackUrl
+                ) { api ->
+                    api.getLatestSnapshot(
+                        apiKey = supabaseAnonKey,
+                        bearerToken = "Bearer $bearer"
+                    )
+                }
+
                 if (rows.isEmpty()) {
-                    portalData = null
-                    errorMessage = "Connected to Supabase, but 0 rows were found in " +
-                        "'student_portal_snapshots'. Run your Python sync script or check Supabase RLS policies."
+                    if (portalData == null) {
+                        errorMessage = "Connected, but 0 rows found in 'student_portal_snapshots'. Check Python sync script or RLS policy."
+                    }
                 } else {
                     val latestRow = rows.first()
+                    LocalPortalCache.saveSnapshot(context, latestRow)
                     portalData = parseSnapshotRow(latestRow)
-                    // Save to offline cache
-                    prefs.edit()
-                        .putString("cached_snapshot_json", Gson().toJson(latestRow))
-                        .apply()
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                errorMessage = "Failed to load data: ${e.localizedMessage ?: "Network error"}"
+                // If SRM Wi-Fi blocks the connection or has captive portal redirects, keep showing cached data!
+                errorMessage = if (portalData != null) {
+                    "Offline / SRM Wi-Fi restricted — showing last synced data (${portalData?.snapshotDate})."
+                } else {
+                    "Network unreachable (${e.javaClass.simpleName}). Configure FALLBACK_GATEWAY_URL or switch to mobile data."
+                }
             } finally {
                 isLoading = false
             }
         }
     }
 
-    if (accessToken == null) {
+    // Auto-refresh in the background when the app opens if already signed in
+    LaunchedEffect(isSignedIn) {
+        if (isSignedIn) {
+            fetchPortalSnapshot(accessToken)
+        }
+    }
+
+    if (!isSignedIn) {
         LoginScreen(
             isLoading = isLoading,
             errorMessage = errorMessage,
             onOpenSettings = { showSettingsDialog = true },
             onSignIn = { rawInput, password ->
                 if (supabaseUrl.contains("YOUR_PROJECT_ID") || supabaseAnonKey.contains("YOUR_SUPABASE")) {
-                    errorMessage = "Please configure your Supabase URL & Anon Key (click ⚙️ Server Settings below)."
+                    errorMessage = "Please configure your Supabase URL & Anon Key (click ⚙️ Server Configuration below)."
                     return@LoginScreen
                 }
                 scope.launch {
@@ -433,51 +567,51 @@ fun StudentPortalApp() {
                             rawInput.trim() + DEFAULT_EMAIL_DOMAIN
                         }
 
-                        val api = ApiClient.get(supabaseUrl)
-                        val authResponse = api.signIn(
-                            apiKey = supabaseAnonKey,
-                            body = SupabaseLoginRequest(email = email, password = password)
-                        )
-                        val token = authResponse.accessToken
-                        accessToken = token
+                        val authResponse = ApiClient.callWithFailover(
+                            primaryUrl = supabaseUrl,
+                            fallbackUrl = fallbackUrl
+                        ) { api ->
+                            api.signIn(
+                                apiKey = supabaseAnonKey,
+                                body = SupabaseLoginRequest(email = email, password = password)
+                            )
+                        }
+
+                        accessToken = authResponse.accessToken
                         loggedInIdentifier = rawInput.trim()
                         loggedInUserId = authResponse.user?.id
+                        isSignedIn = true
 
-                        prefs.edit()
-                            .putString("cached_access_token", token)
-                            .putString("cached_identifier", loggedInIdentifier)
-                            .putString("cached_user_uuid", loggedInUserId)
-                            .apply()
-
-                        fetchPortalSnapshot(token)
+                        LocalPortalCache.saveSession(context, loggedInIdentifier, loggedInUserId, accessToken)
+                        fetchPortalSnapshot(authResponse.accessToken)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        // If Supabase Auth users aren't created yet, fallback to reading with anon key
+                        // Fallback to reading with Anon key if auth users aren't created yet
                         try {
-                            val api = ApiClient.get(supabaseUrl)
-                            val fallbackRows = api.getLatestSnapshot(
-                                apiKey = supabaseAnonKey,
-                                bearerToken = "Bearer $supabaseAnonKey"
-                            )
-                            val token = supabaseAnonKey
-                            accessToken = token
+                            val fallbackRows = ApiClient.callWithFailover(
+                                primaryUrl = supabaseUrl,
+                                fallbackUrl = fallbackUrl
+                            ) { api ->
+                                api.getLatestSnapshot(
+                                    apiKey = supabaseAnonKey,
+                                    bearerToken = "Bearer $supabaseAnonKey"
+                                )
+                            }
+                            accessToken = supabaseAnonKey
                             loggedInIdentifier = rawInput.trim()
-
-                            prefs.edit()
-                                .putString("cached_access_token", token)
-                                .putString("cached_identifier", loggedInIdentifier)
-                                .apply()
+                            isSignedIn = true
+                            LocalPortalCache.saveSession(context, loggedInIdentifier, loggedInUserId, accessToken)
 
                             if (fallbackRows.isEmpty()) {
-                                errorMessage = "Signed in, but 'student_portal_snapshots' table is empty. Verify that your Python sync script uploaded rows."
+                                errorMessage = "Signed in, but 'student_portal_snapshots' table is empty. Verify that your sync script uploaded rows."
                             } else {
                                 val latestRow = fallbackRows.first()
+                                LocalPortalCache.saveSnapshot(context, latestRow)
                                 portalData = parseSnapshotRow(latestRow)
-                                prefs.edit().putString("cached_snapshot_json", Gson().toJson(latestRow)).apply()
                             }
                         } catch (_: Exception) {
-                            errorMessage = "Sign-in failed. Verify your email/ID & password in Supabase Auth or check RLS select policy."
+                            errorMessage = "Sign-in failed (${e.javaClass.simpleName}). Check your credentials or network."
                         }
                     } finally {
                         isLoading = false
@@ -492,40 +626,45 @@ fun StudentPortalApp() {
             data = portalData,
             isLoading = isLoading,
             errorMessage = errorMessage,
-            onRefresh = { accessToken?.let { fetchPortalSnapshot(it) } },
+            onRefresh = { fetchPortalSnapshot(accessToken) },
             onSignOut = {
+                LocalPortalCache.clearAll(context)
                 accessToken = null
                 portalData = null
                 errorMessage = null
-                prefs.edit()
-                    .remove("cached_access_token")
-                    .remove("cached_snapshot_json")
-                    .remove("cached_identifier")
-                    .remove("cached_user_uuid")
-                    .apply()
+                isSignedIn = false
             }
         )
     }
 
     if (showSettingsDialog) {
         var tempUrl by remember { mutableStateOf(supabaseUrl) }
+        var tempFallback by remember { mutableStateOf(fallbackUrl) }
         var tempKey by remember { mutableStateOf(supabaseAnonKey) }
 
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
-            title = { Text("Supabase Configuration", fontWeight = FontWeight.Bold) },
+            title = { Text("Server & Wi-Fi Configuration", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "Configure your Supabase Project URL and public 'anon' key. These are saved on device without reinstalling the app.",
+                        "Set your Supabase URL, public anon key, and optional Cloudflare Worker relay. Saved directly on device without rebuilding.",
                         fontSize = 12.sp,
                         color = Muted
                     )
                     OutlinedTextField(
                         value = tempUrl,
                         onValueChange = { tempUrl = it },
-                        label = { Text("Supabase URL") },
+                        label = { Text("Primary Supabase URL") },
                         placeholder = { Text("https://your-project.supabase.co") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = tempFallback,
+                        onValueChange = { tempFallback = it },
+                        label = { Text("Cloudflare Relay URL (Optional)") },
+                        placeholder = { Text("https://your-worker.workers.dev") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -544,13 +683,12 @@ fun StudentPortalApp() {
                 Button(
                     onClick = {
                         val cleanUrl = tempUrl.trim()
+                        val cleanFallback = tempFallback.trim()
                         val cleanKey = tempKey.trim()
                         supabaseUrl = cleanUrl
+                        fallbackUrl = cleanFallback
                         supabaseAnonKey = cleanKey
-                        prefs.edit()
-                            .putString("supabase_url", cleanUrl)
-                            .putString("supabase_anon_key", cleanKey)
-                            .apply()
+                        LocalPortalCache.saveConfig(context, cleanUrl, cleanFallback, cleanKey)
                         showSettingsDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Navy)
@@ -568,7 +706,7 @@ fun StudentPortalApp() {
 }
 
 // =========================================================================
-// 5. SCREENS (LOGIN, DASHBOARD, TIMETABLE, ATTENDANCE, MARKS)
+// 7. SCREENS (LOGIN, DASHBOARD, TIMETABLE, ATTENDANCE, MARKS)
 // =========================================================================
 @Composable
 private fun LoginScreen(
@@ -654,7 +792,7 @@ private fun LoginScreen(
                         onClick = onOpenSettings,
                         modifier = Modifier.align(Alignment.CenterHorizontally)
                     ) {
-                        Text("⚙️ Configure Supabase Server", color = Muted, fontSize = 12.sp)
+                        Text("⚙️ Server & Wi-Fi Configuration", color = Muted, fontSize = 12.sp)
                     }
                 }
             }
@@ -746,7 +884,7 @@ private fun AuthenticatedPortalScaffold(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFFFDECEC))
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Data Sync Notice", color = Danger, fontWeight = FontWeight.Bold)
+                        Text("Data Notice", color = Danger, fontWeight = FontWeight.Bold)
                         Text(msg, color = Ink, fontSize = 13.sp)
                         userUuid?.let {
                             Text("Logged-in User UUID: $it", color = Muted, fontSize = 11.sp)
