@@ -12,6 +12,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -23,18 +24,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -42,7 +42,6 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val SRM_PORTAL_URL = "https://academia.srmist.edu.in/"
-private const val DEFAULT_SRM_DOMAIN = "@srmist.edu.in"
 
 private val Navy = Color(0xFF153B63)
 private val Teal = Color(0xFF18A999)
@@ -116,14 +115,15 @@ data class PortalSnapshotUiData(
 )
 
 // =========================================================================
-// 2. LOCAL OFFLINE STORAGE (WORKS OFFLINE & ON SRM WI-FI)
+// 2. LOCAL OFFLINE STORAGE (PERSISTS DATA & SESSION COOKIES)
 // =========================================================================
-object LocalPortalCache {
-    private const val CACHE_FILE = "srm_portal_data_v2.json"
+internal object LocalPortalCache {
+    private const val CACHE_FILE = "srm_portal_data_v3.json"
 
     fun saveJson(context: Context, rawJson: String) {
         runCatching {
             File(context.filesDir, CACHE_FILE).writeText(rawJson, Charsets.UTF_8)
+            CookieManager.getInstance().flush()
         }
     }
 
@@ -131,7 +131,12 @@ object LocalPortalCache {
         return runCatching {
             val file = File(context.filesDir, CACHE_FILE)
             if (!file.exists()) return null
-            parsePortalJson(JSONObject(file.readText(Charsets.UTF_8)))
+            val parsed = parsePortalJson(JSONObject(file.readText(Charsets.UTF_8)))
+            if (parsed.attendance.isEmpty() && parsed.classes.isEmpty() && parsed.marks.isEmpty()) {
+                null
+            } else {
+                parsed
+            }
         }.getOrNull()
     }
 
@@ -145,9 +150,9 @@ object LocalPortalCache {
 }
 
 // =========================================================================
-// 3. JSON PARSER FOR EXTRACTED SRM PORTAL TABLES
+// 3. PARSER FOR EXTRACTED SRM PORTAL DATA
 // =========================================================================
-fun parsePortalJson(root: JSONObject): PortalSnapshotUiData {
+internal fun parsePortalJson(root: JSONObject): PortalSnapshotUiData {
     val todayDate = SimpleDateFormat("dd MMM", Locale.ENGLISH).format(Date()).uppercase()
     val syncedAt = root.optString(
         "syncedAt",
@@ -155,7 +160,7 @@ fun parsePortalJson(root: JSONObject): PortalSnapshotUiData {
     )
 
     val studentName = root.optString("studentName").ifBlank { "SRM Student" }
-    val regNumber = root.optString("regNumber").ifBlank { "Signed In" }
+    val regNumber = root.optString("regNumber").ifBlank { "SRM Academia" }
     val department = root.optString("department").ifBlank { "SRMIST" }
     val semester = root.optString("semester").ifBlank { "" }
     val dayOrder = root.optString("dayOrder").ifBlank { "Active" }
@@ -264,7 +269,7 @@ fun parsePortalJson(root: JSONObject): PortalSnapshotUiData {
     )
 }
 
-fun slotToTiming(slot: String): String {
+internal fun slotToTiming(slot: String): String {
     val clean = slot.uppercase()
     return when {
         clean.startsWith("A") -> "08:00 AM - 08:50 AM (Slot $slot)"
@@ -281,7 +286,7 @@ fun slotToTiming(slot: String): String {
 }
 
 // =========================================================================
-// 4. JAVASCRIPT DOM EXTRACTOR FOR SRM ACADEMIA (ATTENDANCE, MARKS, CLASSES)
+// 4. JAVASCRIPT EXTRACTOR FOR SRM ACADEMIA
 // =========================================================================
 private val JS_EXTRACT_SRM_DATA = """
 (function() {
@@ -290,12 +295,17 @@ private val JS_EXTRACT_SRM_DATA = """
     }
 
     var bodyText = document.body ? clean(document.body.innerText) : "";
-    var isLoginPage = !!document.querySelector('input[type="password"], #login_id, #signinFrame, iframe[src*="signin"]');
+    var hasLoginInput = !!document.querySelector('input[type="password"], #login_id, #signinFrame, iframe[src*="signin"], iframe[src*="accounts"]');
+    var hasPortalContent = bodyText.indexOf("Registration Number") !== -1 ||
+                           bodyText.indexOf("Hours Conducted") !== -1 ||
+                           bodyText.indexOf("Day Order") !== -1 ||
+                           bodyText.indexOf("My Attendance") !== -1 ||
+                           bodyText.indexOf("Sign Out") !== -1;
 
     var result = {
         url: window.location.href,
         hash: window.location.hash,
-        isLoginPage: isLoginPage && bodyText.indexOf("Registration Number") === -1 && bodyText.indexOf("Hours Conducted") === -1,
+        isLoggedIn: hasPortalContent && !hasLoginInput,
         studentName: "",
         regNumber: "",
         department: "",
@@ -306,13 +316,9 @@ private val JS_EXTRACT_SRM_DATA = """
         classes: []
     };
 
-    // Extract Day Order if visible anywhere on the page
     var doMatch = bodyText.match(/Day\s*Order\s*[:\-]?\s*([0-9]+|No\s*Day\s*Order|Holiday)/i);
-    if (doMatch) {
-        result.dayOrder = clean(doMatch[1]);
-    }
+    if (doMatch) result.dayOrder = clean(doMatch[1]);
 
-    // Extract Student Profile fields
     var regMatch = bodyText.match(/Registration\s*Number\s*[:\-]?\s*([A-Z0-9]{10,20})/i);
     if (regMatch) result.regNumber = clean(regMatch[1]);
 
@@ -322,11 +328,10 @@ private val JS_EXTRACT_SRM_DATA = """
         var rows = Array.from(table.querySelectorAll("tr"));
         if (rows.length === 0) return;
 
-        // Check key-value profile cells
         rows.forEach(function(r) {
             var cells = Array.from(r.querySelectorAll("td, th")).map(function(c) { return clean(c.innerText); });
             for (var i = 0; i < cells.length - 1; i++) {
-                var k = cells[i].toLowerCase();
+                var k = cells[i].toLowerCase().replace(/[:\-]/g, "").trim();
                 var v = cells[i + 1];
                 if (!v) continue;
                 if ((k === "name" || k === "student name") && !result.studentName) result.studentName = v;
@@ -338,7 +343,7 @@ private val JS_EXTRACT_SRM_DATA = """
 
         var headerIndex = -1;
         var headers = [];
-        for (var rIdx = 0; rIdx < Math.min(rows.length, 4); rIdx++) {
+        for (var rIdx = 0; rIdx < Math.min(rows.length, 5); rIdx++) {
             var candidate = Array.from(rows[rIdx].children).map(function(c) { return clean(c.innerText).toLowerCase(); });
             var joined = candidate.join(" | ");
             if (joined.indexOf("course code") !== -1 || joined.indexOf("hours conducted") !== -1 || joined.indexOf("test performance") !== -1) {
@@ -349,7 +354,6 @@ private val JS_EXTRACT_SRM_DATA = """
         }
 
         if (headerIndex === -1) return;
-        var headerLine = headers.join(" | ");
 
         var idxCode = headers.findIndex(function(h) { return h.indexOf("course code") !== -1 || h === "code"; });
         var idxTitle = headers.findIndex(function(h) { return h.indexOf("course title") !== -1 || h.indexOf("subject") !== -1 || h === "title"; });
@@ -361,7 +365,7 @@ private val JS_EXTRACT_SRM_DATA = """
         var idxAttn = headers.findIndex(function(h) { return h.indexOf("attn") !== -1 || h.indexOf("%") !== -1; });
         var idxPerf = headers.findIndex(function(h) { return h.indexOf("test performance") !== -1 || h.indexOf("performance") !== -1 || h.indexOf("marks") !== -1; });
 
-        // 1. Attendance Table (also contains Course, Slot, Faculty, Room)
+        // 1. Attendance & Course Schedule Table
         if (idxConducted !== -1 && idxTitle !== -1) {
             for (var i = headerIndex + 1; i < rows.length; i++) {
                 var cols = Array.from(rows[i].children).map(function(c) { return clean(c.innerText); });
@@ -410,7 +414,6 @@ private val JS_EXTRACT_SRM_DATA = """
                 var perfText = clean(mCols[idxPerf].innerText);
                 if (!perfText || perfText === "-" || perfText.toLowerCase() === "nil") continue;
 
-                // Match patterns like "FT-I/5.00 4.50" or "CT-1 / 15.00 : 12.50"
                 var regex = /([A-Za-z0-9_\-]+)\s*\/\s*([0-9.]+)\s*[:\-]?\s*([0-9.]+|Abs)/g;
                 var match;
                 var foundSubTests = false;
@@ -442,37 +445,6 @@ private val JS_EXTRACT_SRM_DATA = """
                 }
             }
         }
-
-        // 3. Dedicated Timetable / Course Registration Table (Updates Room & Slot details)
-        else if (headerLine.indexOf("slot") !== -1 && idxTitle !== -1 && idxConducted === -1) {
-            for (var t = headerIndex + 1; t < rows.length; t++) {
-                var tCols = Array.from(rows[t].children).map(function(c) { return clean(c.innerText); });
-                if (tCols.length <= idxTitle) continue;
-
-                var tCode = idxCode !== -1 ? (tCols[idxCode] || "").split(" ")[0] : "";
-                var tTitle = tCols[idxTitle] || "";
-                if (!tTitle || tTitle.toLowerCase().indexOf("course title") !== -1) continue;
-
-                var tSlot = idxSlot !== -1 ? (tCols[idxSlot] || "") : "";
-                var tRoom = idxRoom !== -1 ? (tCols[idxRoom] || "") : "";
-                var tFac = idxFaculty !== -1 ? (tCols[idxFaculty] || "") : "";
-
-                var existing = result.classes.find(function(c) { return c.code === tCode && tCode !== ""; });
-                if (existing) {
-                    if (tRoom) existing.room = tRoom;
-                    if (tSlot) existing.slot = tSlot;
-                    if (tFac) existing.faculty = tFac;
-                } else {
-                    result.classes.push({
-                        code: tCode,
-                        subject: tTitle,
-                        slot: tSlot,
-                        room: tRoom,
-                        faculty: tFac
-                    });
-                }
-            }
-        }
     });
 
     return JSON.stringify(result);
@@ -480,7 +452,7 @@ private val JS_EXTRACT_SRM_DATA = """
 """.trimIndent()
 
 // =========================================================================
-// 5. MAIN APP STATE & DIRECT PORTAL SYNC FLOW
+// 5. MAIN APP STATE
 // =========================================================================
 private enum class AppTab(val label: String, val symbol: String) {
     Home("Home", "⌂"),
@@ -508,40 +480,27 @@ private fun PortalTheme(content: @Composable () -> Unit) {
 fun StudentPortalApp() {
     val context = LocalContext.current
     var portalData by remember { mutableStateOf(LocalPortalCache.loadData(context)) }
-    var isSyncingPortal by remember { mutableStateOf(false) }
-    var pendingUsername by remember { mutableStateOf("") }
-    var pendingPassword by remember { mutableStateOf("") }
+    var showPortalWebView by remember { mutableStateOf(false) }
 
-    if (isSyncingPortal) {
-        DirectSrmPortalSyncScreen(
-            username = pendingUsername,
-            password = pendingPassword,
+    if (showPortalWebView) {
+        SrmOfficialPortalSignInAndSyncScreen(
             onSyncComplete = { rawJson, parsedData ->
                 LocalPortalCache.saveJson(context, rawJson)
                 portalData = parsedData
-                pendingPassword = ""
-                isSyncingPortal = false
+                showPortalWebView = false
             },
             onCancel = {
-                isSyncingPortal = false
+                showPortalWebView = false
             }
         )
     } else if (portalData == null) {
-        LoginScreen(
-            onStartPortalSync = { user, pass ->
-                pendingUsername = if (user.contains("@")) user.trim() else user.trim() + DEFAULT_SRM_DOMAIN
-                pendingPassword = pass
-                isSyncingPortal = true
-            }
+        WelcomeStartScreen(
+            onOpenSrmSignIn = { showPortalWebView = true }
         )
     } else {
         AuthenticatedPortalScaffold(
             data = portalData!!,
-            onRefresh = {
-                pendingUsername = ""
-                pendingPassword = ""
-                isSyncingPortal = true
-            },
+            onRefresh = { showPortalWebView = true },
             onSignOut = {
                 LocalPortalCache.clear(context)
                 portalData = null
@@ -551,256 +510,186 @@ fun StudentPortalApp() {
 }
 
 // =========================================================================
-// 6. AUTOMATIC SRM PORTAL ENGINE (LOGS IN & EXTRACTS TABLES AUTOMATICALLY)
+// 6. OFFICIAL SRM SIGN-IN & AUTO-EXTRACTION SCREEN
 // =========================================================================
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun DirectSrmPortalSyncScreen(
-    username: String,
-    password: String,
+private fun SrmOfficialPortalSignInAndSyncScreen(
     onSyncComplete: (String, PortalSnapshotUiData) -> Unit,
     onCancel: () -> Unit
 ) {
-    var statusText by remember { mutableStateOf("Connecting to SRM Student Portal...") }
-    var showInteractivePortal by remember { mutableStateOf(false) }
+    BackHandler {
+        onCancel()
+    }
+
+    var statusText by remember {
+        mutableStateOf("Sign in with your SRM NetID (e.g., ab1234@srmist.edu.in, NOT RA... Reg No)")
+    }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var mergedJson by remember { mutableStateOf(JSONObject()) }
-    var askedForTimetable by remember { mutableStateOf(false) }
+    var navigatedToAttendance by remember { mutableStateOf(false) }
 
-    // Background polling loop: auto-fills credentials, navigates to Attendance & Timetable,
-    // and extracts the student's live data as soon as the tables appear.
-    LaunchedEffect(webViewRef) {
-        val webView = webViewRef ?: return@LaunchedEffect
-        var elapsedSeconds = 0
+    // Helper function to trigger immediate extraction
+    fun runExtraction(webView: WebView, forceCompleteIfAnyData: Boolean = false) {
+        webView.evaluateJavascript(JS_EXTRACT_SRM_DATA) { rawResult ->
+            if (rawResult.isNullOrBlank() || rawResult == "null") return@evaluateJavascript
+            runCatching {
+                val unescaped = JSONTokener(rawResult).nextValue().toString()
+                val current = JSONObject(unescaped)
+                val isLoggedIn = current.optBoolean("isLoggedIn", false)
 
-        while (true) {
-            delay(1500)
-            elapsedSeconds += 1
+                for (key in listOf("studentName", "regNumber", "department", "semester", "dayOrder")) {
+                    val v = current.optString(key)
+                    if (v.isNotBlank()) mergedJson.put(key, v)
+                }
 
-            // If login takes more than 7 seconds (e.g., CAPTCHA or Zoho session limit prompt),
-            // automatically reveal the portal window so the student can see/tap it.
-            if (elapsedSeconds == 5 && mergedJson.optJSONArray("attendance") == null) {
-                showInteractivePortal = true
-                statusText = "If SRM shows a CAPTCHA or session prompt below, complete it—data will sync automatically."
-            }
+                val att = current.optJSONArray("attendance")
+                val mrk = current.optJSONArray("marks")
+                val cls = current.optJSONArray("classes")
 
-            // Inject auto-login script if credentials were provided
-            if (username.isNotBlank() && password.isNotBlank()) {
-                val safeUser = JSONObject.quote(username)
-                val safePass = JSONObject.quote(password)
-                val autoLoginJs = """
-                    (function() {
-                        function tryFill(doc) {
-                            if (!doc) return;
-                            var u = doc.querySelector('#login_id, input[name="username"], input[type="email"], input[name="LOGIN_ID"]');
-                            var p = doc.querySelector('#password, input[name="password"], input[type="password"]');
-                            var btn = doc.querySelector('#nextbtn, button[type="submit"], input[type="submit"]');
-                            if (u && (!p || p.offsetParent === null)) {
-                                if (!u.value) {
-                                    u.value = $safeUser;
-                                    u.dispatchEvent(new Event('input', { bubbles: true }));
-                                    if (btn) btn.click();
-                                }
-                            } else if (p && p.offsetParent !== null) {
-                                if (!p.value) {
-                                    p.value = $safePass;
-                                    p.dispatchEvent(new Event('input', { bubbles: true }));
-                                    if (btn) btn.click();
-                                }
+                if (att != null && att.length() > 0) mergedJson.put("attendance", att)
+                if (mrk != null && mrk.length() > 0) mergedJson.put("marks", mrk)
+                if (cls != null && cls.length() > 0) mergedJson.put("classes", cls)
+
+                val hasAttendance = (mergedJson.optJSONArray("attendance")?.length() ?: 0) > 0
+
+                if (hasAttendance || (forceCompleteIfAnyData && isLoggedIn)) {
+                    mergedJson.put(
+                        "syncedAt",
+                        SimpleDateFormat("dd MMM, hh:mm a", Locale.ENGLISH).format(Date())
+                    )
+                    val parsed = parsePortalJson(mergedJson)
+                    onSyncComplete(mergedJson.toString(), parsed)
+                } else if (isLoggedIn && !navigatedToAttendance) {
+                    navigatedToAttendance = true
+                    statusText = "Signed in! Automatically opening My Attendance & Marks..."
+                    val navJs = """
+                        (function() {
+                            var links = Array.from(document.querySelectorAll('a'));
+                            var attLink = links.find(function(a) {
+                                var t = (a.innerText || '').toLowerCase();
+                                var h = (a.getAttribute('href') || '').toLowerCase();
+                                return t.indexOf('my attendance') !== -1 || h.indexOf('my_attendance') !== -1;
+                            });
+                            if (attLink) {
+                                attLink.click();
+                            } else {
+                                window.location.hash = '#Page:My_Attendance';
                             }
-                        }
-                        tryFill(document);
-                        var frames = document.querySelectorAll('iframe');
-                        for (var i = 0; i < frames.length; i++) {
-                            try { tryFill(frames[i].contentDocument); } catch (e) {}
-                        }
-                    })();
-                """.trimIndent()
-                webView.evaluateJavascript(autoLoginJs, null)
-            }
-
-            // Evaluate the DOM extractor
-            webView.evaluateJavascript(JS_EXTRACT_SRM_DATA) { rawResult ->
-                if (rawResult.isNullOrBlank() || rawResult == "null") return@evaluateJavascript
-                runCatching {
-                    val unescaped = org.json.JSONTokener(rawResult).nextValue().toString()
-                    val current = JSONObject(unescaped)
-                    val isLogin = current.optBoolean("isLoginPage", true)
-                    val currentHash = current.optString("hash", "")
-
-                    if (!isLogin) {
-                        // Merge profile fields
-                        for (key in listOf("studentName", "regNumber", "department", "semester", "dayOrder")) {
-                            val v = current.optString(key)
-                            if (v.isNotBlank()) mergedJson.put(key, v)
-                        }
-
-                        val att = current.optJSONArray("attendance")
-                        val mrk = current.optJSONArray("marks")
-                        val cls = current.optJSONArray("classes")
-
-                        if (att != null && att.length() > 0) {
-                            mergedJson.put("attendance", att)
-                        }
-                        if (mrk != null && mrk.length() > 0) {
-                            mergedJson.put("marks", mrk)
-                        }
-                        if (cls != null && cls.length() > 0) {
-                            mergedJson.put("classes", cls)
-                        }
-
-                        val hasAttendance = (mergedJson.optJSONArray("attendance")?.length() ?: 0) > 0
-
-                        if (!hasAttendance && !currentHash.contains("My_Attendance", ignoreCase = true)) {
-                            statusText = "Signed in! Opening Attendance & Internal Marks..."
-                            webView.evaluateJavascript("window.location.hash = '#Page:My_Attendance';", null)
-                        } else if (hasAttendance && !askedForTimetable) {
-                            askedForTimetable = true
-                            statusText = "Attendance & Marks extracted! Fetching Timetable rooms & slots..."
-                            webView.evaluateJavascript("window.location.hash = '#Page:My_Time_Table_2023_24';", null)
-                        } else if (hasAttendance) {
-                            mergedJson.put(
-                                "syncedAt",
-                                SimpleDateFormat("dd MMM, hh:mm a", Locale.ENGLISH).format(Date())
-                            )
-                            val finalJsonString = mergedJson.toString()
-                            val parsed = parsePortalJson(mergedJson)
-                            onSyncComplete(finalJsonString, parsed)
-                        }
-                    }
+                        })();
+                    """.trimIndent()
+                    webView.evaluateJavascript(navJs, null)
                 }
             }
+        }
+    }
+
+    // Passive observer: watches for login completion & table rendering without interfering with typing
+    LaunchedEffect(webViewRef) {
+        val webView = webViewRef ?: return@LaunchedEffect
+        while (true) {
+            delay(2000)
+            runExtraction(webView, forceCompleteIfAnyData = false)
         }
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = PageBackground) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header bar
-            Row(
+            // Top bar with clear instructions & manual "Done / Sync Now" button
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Navy)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = Color.White,
-                    strokeWidth = 2.dp
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        "Syncing SRM Student Portal",
+                        "SRM Academia Portal",
                         color = Color.White,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
+                        fontSize = 16.sp,
+                        modifier = Modifier.weight(1f)
                     )
-                    Text(
-                        statusText,
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 12.sp
-                    )
-                }
-                TextButton(onClick = { showInteractivePortal = !showInteractivePortal }) {
-                    Text(
-                        if (showInteractivePortal) "Hide View" else "Show Portal",
-                        color = Color.White,
-                        fontSize = 12.sp
-                    )
-                }
-                TextButton(onClick = onCancel) {
-                    Text("Cancel", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                }
-            }
-
-            Box(modifier = Modifier.fillMaxSize()) {
-                AndroidView(
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            CookieManager.getInstance().setAcceptCookie(true)
-                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.databaseEnabled = true
-                            settings.loadsImagesAutomatically = true
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            settings.userAgentString =
-                                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-                            webChromeClient = WebChromeClient()
-                            webViewClient = object : WebViewClient() {
-                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                    super.onPageStarted(view, url, favicon)
-                                }
-
-                                override fun shouldOverrideUrlLoading(
-                                    view: WebView?,
-                                    request: WebResourceRequest?
-                                ): Boolean = false
-                            }
-
-                            loadUrl(SRM_PORTAL_URL)
-                            webViewRef = this
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .alpha(if (showInteractivePortal) 1f else 0.01f)
-                )
-
-                if (!showInteractivePortal) {
-                    Card(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp)
-                            .fillMaxWidth(),
-                        shape = RoundedCornerShape(22.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White)
+                    TextButton(
+                        onClick = { webViewRef?.let { runExtraction(it, forceCompleteIfAnyData = true) } }
                     ) {
-                        Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            CircularProgressIndicator(color = Navy)
-                            Text(
-                                "Fetching Your SRM Data...",
-                                color = Ink,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp
-                            )
-                            Text(
-                                statusText,
-                                color = Muted,
-                                fontSize = 13.sp
-                            )
-                            OutlinedButton(onClick = { showInteractivePortal = true }) {
-                                Text("Show Portal Window (for CAPTCHA / OTP)")
-                            }
-                        }
+                        Text("Import Page Now", color = Teal, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    TextButton(onClick = onCancel) {
+                        Text("Close", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
                     }
                 }
+                Text(
+                    statusText,
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontSize = 12.sp
+                )
             }
+
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        cookieManager.setAcceptThirdPartyCookies(this, true)
+
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.loadsImagesAutomatically = true
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
+                        settings.setSupportZoom(true)
+                        settings.builtInZoomControls = true
+                        settings.displayZoomControls = false
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.userAgentString =
+                            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+                        webChromeClient = WebChromeClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                CookieManager.getInstance().flush()
+                                if (view != null) {
+                                    runExtraction(view, forceCompleteIfAnyData = false)
+                                }
+                            }
+
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean = false
+                        }
+
+                        loadUrl(SRM_PORTAL_URL)
+                        webViewRef = this
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }
 
 // =========================================================================
-// 7. LOGIN SCREEN & NATIVE DASHBOARD SCREENS
+// 7. WELCOME SCREEN & NATIVE DASHBOARD SCREENS
 // =========================================================================
 @Composable
-private fun LoginScreen(
-    onStartPortalSync: (String, String) -> Unit
+private fun WelcomeStartScreen(
+    onOpenSrmSignIn: () -> Unit
 ) {
-    var identifier by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-
     Surface(modifier = Modifier.fillMaxSize(), color = PageBackground) {
         Box(
             modifier = Modifier
@@ -825,41 +714,28 @@ private fun LoginScreen(
                         letterSpacing = 1.sp
                     )
                     Text(
-                        "Sign in with your SRM NetID",
+                        "Connect Your SRM Account",
                         color = Ink,
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Connects directly to SRM Academia to load your Attendance, Timetable, Day Order, and Internal Marks.",
+                        "Important: Sign in using your SRM NetID email (e.g., ab1234@srmist.edu.in). Do not enter your RA... Registration Number as your email, or SRM will report 'Account does not exist'.",
+                        color = Muted,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        "Once you sign in (and complete CAPTCHA if shown), your Attendance, Timetable, Rooms, and Internal Marks will be imported and saved offline automatically.",
                         color = Muted,
                         fontSize = 13.sp
                     )
 
-                    OutlinedTextField(
-                        value = identifier,
-                        onValueChange = { identifier = it },
-                        label = { Text("SRM Email or NetID") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
                     Button(
-                        onClick = { onStartPortalSync(identifier, password) },
-                        enabled = identifier.isNotBlank() && password.isNotBlank(),
+                        onClick = onOpenSrmSignIn,
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = Navy)
                     ) {
-                        Text("Sign In & Fetch My Data")
+                        Text("Open SRM Sign-In & Auto-Sync")
                     }
                 }
             }
@@ -922,9 +798,10 @@ private fun AuthenticatedPortalScaffold(
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    val subline = listOf(data.department, data.semester.let { if (it.isNotBlank()) "Sem $it" else "" })
-                        .filter { it.isNotBlank() }
-                        .joinToString(" • ")
+                    val subline = listOf(
+                        data.department,
+                        data.semester.let { if (it.isNotBlank()) "Sem $it" else "" }
+                    ).filter { it.isNotBlank() }.joinToString(" • ")
                     if (subline.isNotBlank()) {
                         Text(subline, color = Muted, fontSize = 12.sp)
                     }
@@ -1018,7 +895,7 @@ private fun DashboardScreen(data: PortalSnapshotUiData) {
         }
 
         Text("Your Courses & Schedule", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        data.classes.take(5).forEach { ClassCard(it) }
+        data.classes.forEach { ClassCard(it) }
     }
 }
 
