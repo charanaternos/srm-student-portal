@@ -143,5 +143,27 @@ class DataMappingTest {
         assertEquals(1, directSnapshot.getResolvedAttendance().size)
         assertEquals(0, directSnapshot.getResolvedMarks().size)
     }
+
+    @Test
+    fun studentProfile_computedPropertiesAndFallbacks() {
+        val profile = com.example.srmstudent.domain.model.StudentProfile(
+            displayName = "Alex Morgan",
+            studentId = "RA2311003010999",
+            programme = "B.Tech CSE",
+            semester = "Semester 4"
+        )
+
+        assertEquals("Alex Morgan", profile.name)
+        assertEquals("RA2311003010999", profile.regNumber)
+        assertEquals("B.Tech CSE", profile.program)
+
+        val fallbackProfile = com.example.srmstudent.domain.model.StudentProfile(
+            displayName = null,
+            studentId = "RA2311003010888"
+        )
+        assertEquals("RA2311003010888", fallbackProfile.name)
+        assertEquals("RA2311003010888", fallbackProfile.regNumber)
+        assertEquals("", fallbackProfile.program)
+    }
 }
 
