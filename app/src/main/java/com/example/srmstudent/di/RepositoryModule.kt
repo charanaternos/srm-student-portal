@@ -1,6 +1,8 @@
 package com.example.srmstudent.di
 
+import com.example.srmstudent.data.repository.PortalAuthRepositoryImpl
 import com.example.srmstudent.data.repository.SrmRepositoryImpl
+import com.example.srmstudent.domain.repository.PortalAuthRepository
 import com.example.srmstudent.domain.repository.SrmRepository
 import dagger.Binds
 import dagger.Module
@@ -21,9 +23,14 @@ abstract class RepositoryModule {
         impl: SrmRepositoryImpl
     ): SrmRepository
 
+    @Binds
+    @Singleton
+    abstract fun bindPortalAuthRepository(
+        impl: PortalAuthRepositoryImpl
+    ): PortalAuthRepository
+
     companion object {
         @Provides
         fun provideIoDispatcher(): CoroutineDispatcher = Dispatchers.IO
     }
 }
-

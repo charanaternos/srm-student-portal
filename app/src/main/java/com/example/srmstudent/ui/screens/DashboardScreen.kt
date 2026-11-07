@@ -25,6 +25,14 @@ fun DashboardScreen(
     overview: AcademicOverview,
     modifier: Modifier = Modifier
 ) {
+    val details = listOfNotNull(overview.profile.programme, overview.profile.semester)
+        .filter { it.isNotBlank() }
+        .joinToString(" • ")
+
+    val hasAcademicData = overview.classes.isNotEmpty() ||
+        overview.attendance.isNotEmpty() ||
+        overview.marks.isNotEmpty()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -38,24 +46,30 @@ fun DashboardScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                overview.profile.displayName
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let {
+                        Text(
+                            "Welcome, $it",
+                            color = Navy,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                    }
                 Text(
-                    "SRM STUDENT PORTAL",
-                    color = Navy,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-                Text(
-                    overview.profile.name,
+                    overview.profile.studentId,
                     color = Ink,
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Text(
-                    "${overview.profile.regNumber} • ${overview.profile.semester}",
-                    color = Muted,
-                    fontSize = 13.sp
-                )
+                if (details.isNotBlank()) {
+                    Text(
+                        details,
+                        color = Muted,
+                        fontSize = 13.sp
+                    )
+                }
             }
 
             Box(
@@ -73,7 +87,7 @@ fun DashboardScreen(
                         contentScale = ContentScale.Crop,
                         error = {
                             Text(
-                                overview.profile.name.take(1).uppercase(),
+                                (overview.profile.displayName ?: overview.profile.studentId).take(1).uppercase(),
                                 color = Navy,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 20.sp
@@ -82,7 +96,7 @@ fun DashboardScreen(
                     )
                 } else {
                     Text(
-                        overview.profile.name.take(1).uppercase(),
+                        (overview.profile.displayName ?: overview.profile.studentId).take(1).uppercase(),
                         color = Navy,
                         fontWeight = FontWeight.Bold,
                         fontSize = 20.sp
@@ -91,106 +105,131 @@ fun DashboardScreen(
             }
         }
 
-        if (overview.isOfflineData) {
+        if (overview.isOfflineData && hasAcademicData) {
             OfflineBanner(lastSynced = overview.lastSyncedAt)
         }
 
-        // Overall Attendance Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(22.dp),
-            colors = CardDefaults.cardColors(containerColor = Navy),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    "OVERALL ATTENDANCE",
-                    color = Color.White.copy(alpha = 0.75f),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${overview.overallAttendancePercent}%",
-                        color = Color.White,
-                        fontSize = 38.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        if (overview.isAttendanceOnTrack) "ON TRACK" else "SHORTAGE ALERT",
-                        color = if (overview.isAttendanceOnTrack) Color.White else AlertRedBg,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(
-                                if (overview.isAttendanceOnTrack)
-                                    Color.White.copy(alpha = 0.16f)
-                                else
-                                    AlertRed.copy(alpha = 0.65f)
-                            )
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
-                }
-                ProgressTrack(
-                    progress = overview.overallAttendancePercent / 100f,
-                    color = if (overview.isAttendanceOnTrack) Teal else AlertRed,
-                    trackColor = Color.White.copy(alpha = 0.2f)
-                )
-                Text(
-                    "75% minimum university requirement",
-                    color = Color.White.copy(alpha = 0.75f),
-                    fontSize = 12.sp
-                )
-            }
-        }
-
-        // Stats Row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            StatCard(
-                label = "Enrolled Courses",
-                value = overview.attendance.size.toString(),
-                detail = "current semester",
-                modifier = Modifier.weight(1f)
-            )
-            StatCard(
-                label = "Marks Average",
-                value = "${overview.overallMarksPercent}%",
-                detail = "${overview.marks.size} assessments",
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        // Upcoming Classes
-        SectionHeading(title = "Upcoming Classes", badge = "TIMETABLE")
-        if (overview.classes.isEmpty()) {
+        if (!hasAcademicData) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("No scheduled classes for today.", color = Muted, fontSize = 14.sp)
+                    Text(
+                        "Student Portal Data",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Ink
+                    )
+                    Text(
+                        "Timetable, attendance, and marks should be loaded here " +
+                            "from the signed-in student's data. No sample student data is shown.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Muted
+                    )
                 }
             }
         } else {
-            overview.classes.take(3).forEach { item ->
-                ClassCard(item = item)
+            // Overall Attendance Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Navy),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "OVERALL ATTENDANCE",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${overview.overallAttendancePercent}%",
+                            color = Color.White,
+                            fontSize = 38.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            if (overview.isAttendanceOnTrack) "ON TRACK" else "SHORTAGE ALERT",
+                            color = if (overview.isAttendanceOnTrack) Color.White else AlertRedBg,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(
+                                    if (overview.isAttendanceOnTrack)
+                                        Color.White.copy(alpha = 0.16f)
+                                    else
+                                        AlertRed.copy(alpha = 0.65f)
+                                )
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                    ProgressTrack(
+                        progress = overview.overallAttendancePercent / 100f,
+                        color = if (overview.isAttendanceOnTrack) Teal else AlertRed,
+                        trackColor = Color.White.copy(alpha = 0.2f)
+                    )
+                    Text(
+                        "75% minimum university requirement",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            // Stats Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                StatCard(
+                    label = "Enrolled Courses",
+                    value = overview.attendance.size.toString(),
+                    detail = "current semester",
+                    modifier = Modifier.weight(1f)
+                )
+                StatCard(
+                    label = "Marks Average",
+                    value = "${overview.overallMarksPercent}%",
+                    detail = "${overview.marks.size} assessments",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Upcoming Classes
+            SectionHeading(title = "Upcoming Classes", badge = "TIMETABLE")
+            if (overview.classes.isEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No scheduled classes found.", color = Muted, fontSize = 14.sp)
+                    }
+                }
+            } else {
+                overview.classes.take(3).forEach { item ->
+                    ClassCard(item = item)
+                }
             }
         }
     }
 }
-

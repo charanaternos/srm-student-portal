@@ -3,6 +3,8 @@ package com.example.srmstudent.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.srmstudent.domain.model.AcademicOverview
+import com.example.srmstudent.domain.model.StudentProfile
+import com.example.srmstudent.domain.repository.PortalAuthRepository
 import com.example.srmstudent.domain.repository.SrmRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,8 +16,12 @@ import javax.inject.Inject
 
 @HiltViewModel
 class PortalViewModel @Inject constructor(
+    val authRepository: PortalAuthRepository,
     private val repository: SrmRepository
 ) : ViewModel() {
+
+    private val _currentProfile = MutableStateFlow<StudentProfile?>(authRepository.getCurrentProfile())
+    val currentProfile: StateFlow<StudentProfile?> = _currentProfile.asStateFlow()
 
     private val _uiState = MutableStateFlow<PortalUiState>(PortalUiState.Loading)
     val uiState: StateFlow<PortalUiState> = _uiState.asStateFlow()
@@ -32,23 +38,31 @@ class PortalViewModel @Inject constructor(
             repository.getAcademicOverview()
                 .catch { e ->
                     _uiState.value = PortalUiState.Error(
-                        message = e.localizedMessage ?: "Failed to read cached data",
+                        message = e.localizedMessage ?: "Failed to read student data",
                         cachedOverview = currentOverview
                     )
                 }
                 .collect { overview ->
                     currentOverview = overview
-                    if (overview.classes.isEmpty() && overview.attendance.isEmpty() && overview.marks.isEmpty()) {
-                        // DB is empty, trigger initial population from local asset
-                        refresh(forceRemote = false)
-                    } else {
-                        _uiState.value = PortalUiState.Success(
-                            overview = overview,
-                            isRefreshing = isRefreshing
-                        )
-                    }
+                    _uiState.value = PortalUiState.Success(
+                        overview = overview,
+                        isRefreshing = isRefreshing
+                    )
                 }
         }
+    }
+
+    suspend fun signIn(studentId: String, password: String): StudentProfile {
+        val profile = authRepository.signIn(studentId, password)
+        _currentProfile.value = profile
+        return profile
+    }
+
+    fun signOut() {
+        authRepository.signOut()
+        _currentProfile.value = null
+        currentOverview = null
+        _uiState.value = PortalUiState.Loading
     }
 
     fun refresh(forceRemote: Boolean = true) {
@@ -63,11 +77,18 @@ class PortalViewModel @Inject constructor(
 
             result.onFailure { error ->
                 _uiState.value = PortalUiState.Error(
-                    message = error.localizedMessage ?: "Refresh failed",
+                    message = error.localizedMessage ?: "Sync from portal failed",
                     cachedOverview = currentOverview
                 )
             }
         }
     }
-}
 
+    fun importJson(jsonString: String) {
+        viewModelScope.launch {
+            isRefreshing = true
+            repository.importJsonData(jsonString)
+            isRefreshing = false
+        }
+    }
+}

@@ -1,6 +1,7 @@
 package com.example.srmstudent.data.repository
 
 import android.content.Context
+import com.example.srmstudent.data.auth.AuthManager
 import com.example.srmstudent.data.local.SrmDatabase
 import com.example.srmstudent.data.local.entity.AttendanceEntity
 import com.example.srmstudent.data.local.entity.ClassEntity
@@ -11,6 +12,7 @@ import com.example.srmstudent.data.model.PortalSnapshotDto
 import com.example.srmstudent.data.remote.SrmApiService
 import com.example.srmstudent.domain.model.AcademicOverview
 import com.example.srmstudent.domain.model.StudentProfile
+import com.example.srmstudent.domain.model.UserSession
 import com.example.srmstudent.domain.repository.SrmRepository
 import com.example.srmstudent.domain.util.CalculationUtils
 import com.google.gson.Gson
@@ -31,6 +33,7 @@ import javax.inject.Singleton
 class SrmRepositoryImpl @Inject constructor(
     private val database: SrmDatabase,
     private val apiService: SrmApiService,
+    private val authManager: AuthManager,
     private val gson: Gson,
     @ApplicationContext private val context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -41,6 +44,8 @@ class SrmRepositoryImpl @Inject constructor(
     private val markDao = database.markDao()
     private val profileDao = database.profileDao()
     private val syncMetaDao = database.syncMetaDao()
+
+    override fun getUserSession(): Flow<UserSession?> = authManager.session
 
     override fun getAcademicOverview(): Flow<AcademicOverview> {
         return combine(
@@ -63,11 +68,12 @@ class SrmRepositoryImpl @Inject constructor(
 
             val isAttendanceOnTrack = CalculationUtils.isAttendanceSufficient(overallAttendancePercent, 75)
 
+            val currentSession = authManager.session.value
             val studentProfile = profileEntity?.toDomain() ?: StudentProfile(
-                name = "SRM Student",
-                regNumber = "RA2211003010156",
-                program = "B.Tech Computer Science and Engineering",
-                semester = "Semester 5",
+                displayName = currentSession?.name ?: currentSession?.netId,
+                studentId = currentSession?.regNumber ?: currentSession?.netId ?: "",
+                programme = null,
+                semester = null,
                 avatarUrl = null
             )
 
@@ -88,42 +94,114 @@ class SrmRepositoryImpl @Inject constructor(
     }
 
     override suspend fun refreshData(forceRemote: Boolean): Result<Unit> = withContext(ioDispatcher) {
+        val session = authManager.session.value
+            ?: return@withContext Result.failure(IllegalStateException("No student is currently signed in"))
+
         var remoteSuccess = false
 
         if (forceRemote) {
             try {
-                val response = apiService.getLatestSnapshot()
+                val authHeader = session.token?.let { "Bearer $it" }
+                val response = apiService.getLatestSnapshot(
+                    apiKey = session.supabaseAnonKey,
+                    authHeader = authHeader
+                )
                 if (response.isSuccessful && !response.body().isNullOrEmpty()) {
                     val snapshot = response.body()!!.first()
-                    saveSnapshotToDatabase(snapshot, source = "REMOTE")
+                    saveSnapshotToDatabase(snapshot, source = "REMOTE", fallbackStudentId = session.regNumber)
                     remoteSuccess = true
                 }
             } catch (_: Exception) {
-                // Network unavailable or endpoint unconfigured; fallback to local export
+                // Remote sync error; leave existing authenticated data untouched
             }
         }
 
-        if (!remoteSuccess) {
-            try {
-                loadFromLocalAsset()
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        } else {
+        if (remoteSuccess) {
             Result.success(Unit)
+        } else {
+            Result.failure(Exception("Sync from portal unavailable"))
         }
     }
 
-    private suspend fun loadFromLocalAsset() {
-        val jsonString = context.assets.open("srm_timetable.json").bufferedReader().use { it.readText() }
-        val snapshot = gson.fromJson(jsonString, PortalSnapshotDto::class.java)
-        saveSnapshotToDatabase(snapshot, source = "ASSET_EXPORT")
+    override suspend fun importJsonData(jsonString: String): Result<Unit> = withContext(ioDispatcher) {
+        try {
+            val session = authManager.session.value
+            val snapshot = gson.fromJson(jsonString, PortalSnapshotDto::class.java)
+            saveSnapshotToDatabase(
+                snapshot = snapshot,
+                source = "USER_IMPORT",
+                fallbackStudentId = session?.regNumber ?: ""
+            )
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
-    private suspend fun saveSnapshotToDatabase(snapshot: PortalSnapshotDto, source: String) {
+    override suspend fun login(
+        netIdOrEmail: String,
+        password: String,
+        supabaseUrl: String?,
+        supabaseAnonKey: String?
+    ): Result<UserSession> = withContext(ioDispatcher) {
+        val trimmedId = netIdOrEmail.trim()
+        val trimmedPassword = password.trim()
+
+        if (trimmedId.isBlank() || trimmedPassword.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Student ID and password must not be blank"))
+        }
+
+        logout()
+
+        val email = if (trimmedId.contains("@")) trimmedId else "$trimmedId@srmist.edu.in"
+        val session = UserSession(
+            netId = trimmedId,
+            email = email,
+            name = trimmedId,
+            regNumber = trimmedId,
+            supabaseUrl = supabaseUrl,
+            supabaseAnonKey = supabaseAnonKey
+        )
+
+        authManager.saveSession(session)
+
+        database.profileDao().insertProfile(
+            ProfileEntity(
+                id = 1,
+                name = trimmedId,
+                regNumber = trimmedId,
+                program = "",
+                semester = "",
+                avatarUrl = null
+            )
+        )
+
+        Result.success(session)
+    }
+
+    override suspend fun logout() = withContext(ioDispatcher) {
+        authManager.clearSession()
+        database.classDao().clearClasses()
+        database.attendanceDao().clearAttendance()
+        database.markDao().clearMarks()
+        database.profileDao().clearProfile()
+        database.syncMetaDao().setMeta(
+            SyncMetaEntity(
+                key = "last_sync",
+                lastSyncTime = "",
+                syncStatus = "SIGNED_OUT",
+                source = ""
+            )
+        )
+    }
+
+    private suspend fun saveSnapshotToDatabase(
+        snapshot: PortalSnapshotDto,
+        source: String,
+        fallbackStudentId: String
+    ) {
         val classEntities = snapshot.getResolvedClasses().mapIndexed { index, dto ->
-            val code = dto.courseCode ?: "CSE${index + 1}"
+            val code = dto.courseCode ?: "COURSE_${index + 1}"
             val dayOrder = dto.dayOrder ?: "1"
             val start = dto.startTime ?: "09:00"
             ClassEntity(
@@ -136,14 +214,14 @@ class SrmRepositoryImpl @Inject constructor(
                 startTime = start,
                 endTime = dto.endTime ?: "10:00",
                 timeSlot = dto.timeSlot ?: "$start – ${dto.endTime ?: "10:00"}",
-                room = dto.room ?: "TBA",
-                faculty = dto.faculty ?: "Faculty",
+                room = dto.room ?: "",
+                faculty = dto.faculty ?: "",
                 details = dto.details ?: "${dto.subject} ($code)"
             )
         }
 
         val attendanceEntities = snapshot.getResolvedAttendance().mapIndexed { index, dto ->
-            val code = dto.courseCode ?: "CSE${index + 1}"
+            val code = dto.courseCode ?: "COURSE_${index + 1}"
             val attended = dto.parseAttended()
             val total = dto.parseTotal()
             val percentage = CalculationUtils.calculatePercentage(attended, total)
@@ -159,7 +237,7 @@ class SrmRepositoryImpl @Inject constructor(
         }
 
         val markEntities = snapshot.getResolvedMarks().mapIndexed { index, dto ->
-            val code = dto.courseCode ?: "CSE${index + 1}"
+            val code = dto.courseCode ?: "COURSE_${index + 1}"
             val assessment = dto.assessment ?: "Assessment ${index + 1}"
             val obtained = dto.parseObtained()
             val total = dto.parseTotal()
@@ -172,30 +250,19 @@ class SrmRepositoryImpl @Inject constructor(
                 obtained = obtained,
                 total = total,
                 percentage = percentage,
-                date = dto.date ?: "N/A"
+                date = dto.date ?: ""
             )
         }
 
         val profileDto = snapshot.getResolvedProfile()
-        val profileEntity = if (profileDto != null) {
-            ProfileEntity(
-                id = 1,
-                name = profileDto.name ?: "SRM Student",
-                regNumber = profileDto.regNumber ?: "RA2211003010156",
-                program = profileDto.program ?: "B.Tech Computer Science and Engineering",
-                semester = profileDto.semester ?: "Semester 5",
-                avatarUrl = profileDto.avatarUrl
-            )
-        } else {
-            ProfileEntity(
-                id = 1,
-                name = "Kishore Kumar",
-                regNumber = "RA2211003010156",
-                program = "B.Tech Computer Science and Engineering",
-                semester = "Semester 5",
-                avatarUrl = null
-            )
-        }
+        val profileEntity = ProfileEntity(
+            id = 1,
+            name = profileDto?.name ?: fallbackStudentId,
+            regNumber = profileDto?.regNumber ?: fallbackStudentId,
+            program = profileDto?.program ?: "",
+            semester = profileDto?.semester ?: "",
+            avatarUrl = profileDto?.avatarUrl
+        )
 
         val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
@@ -216,4 +283,3 @@ class SrmRepositoryImpl @Inject constructor(
         )
     }
 }
-

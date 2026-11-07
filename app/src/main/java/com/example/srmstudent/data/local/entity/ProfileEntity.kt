@@ -16,12 +16,11 @@ data class ProfileEntity(
 ) {
     fun toDomain(): StudentProfile {
         return StudentProfile(
-            name = name,
-            regNumber = regNumber,
-            program = program,
+            displayName = name,
+            studentId = regNumber,
+            programme = program,
             semester = semester,
             avatarUrl = avatarUrl
         )
     }
 }
-
