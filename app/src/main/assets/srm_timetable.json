@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-11-07T10:30:00+00:00",
+  "portal_timezone": "Asia/Kolkata",
+  "profile": {
+    "name": "Kishore Kumar",
+    "reg_number": "RA2211003010156",
+    "program": "B.Tech Computer Science and Engineering",
+    "semester": "Semester 5",
+    "avatar_url": null
+  },
+  "day_order_mapping": [
+    {
+      "day_order": "1",
+      "day": "MON",
+      "date": "24 AUG",
+      "raw": {}
+    },
+    {
+      "day_order": "2",
+      "day": "TUE",
+      "date": "25 AUG",
+      "raw": {}
+    },
+    {
+      "day_order": "3",
+      "day": "WED",
+      "date": "26 AUG",
+      "raw": {}
+    },
+    {
+      "day_order": "4",
+      "day": "THU",
+      "date": "27 AUG",
+      "raw": {}
+    },
+    {
+      "day_order": "5",
+      "day": "FRI",
+      "date": "28 AUG",
+      "raw": {}
+    }
+  ],
+  "classes": [
+    {
+      "subject": "Data Structures & Algorithms",
+      "course_code": "21CSC204J",
+      "day_order": "1",
+      "day": "MON",
+      "date": "24 AUG",
+      "start_time": "08:45",
+      "end_time": "09:35",
+      "time": "08:45 – 09:35",
+      "room": "TP-402",
+      "faculty": "Dr. Ramesh V.",
+      "details": "Data Structures & Algorithms - 21CSC204J"
+    },
+    {
+      "subject": "Database Management Systems",
+      "course_code": "21CSC210J",
+      "day_order": "1",
+      "day": "MON",
+      "date": "24 AUG",
+      "start_time": "10:30",
+      "end_time": "11:20",
+      "time": "10:30 – 11:20",
+      "room": "UB-603",
+      "faculty": "Dr. Priya S.",
+      "details": "Database Management Systems - 21CSC210J"
+    },
+    {
+      "subject": "Operating Systems",
+      "course_code": "21CSC206J",
+      "day_order": "2",
+      "day": "TUE",
+      "date": "25 AUG",
+      "start_time": "09:40",
+      "end_time": "10:30",
+      "time": "09:40 – 10:30",
+      "room": "TP-405",
+      "faculty": "Prof. Karthik M.",
+      "details": "Operating Systems - 21CSC206J"
+    },
+    {
+      "subject": "Computer Networks",
+      "course_code": "21CSC301J",
+      "day_order": "3",
+      "day": "WED",
+      "date": "26 AUG",
+      "start_time": "11:35",
+      "end_time": "12:25",
+      "time": "11:35 – 12:25",
+      "room": "UB-501",
+      "faculty": "Dr. Ananya R.",
+      "details": "Computer Networks - 21CSC301J"
+    },
+    {
+      "subject": "Software Engineering",
+      "course_code": "21CSC303J",
+      "day_order": "4",
+      "day": "THU",
+      "date": "27 AUG",
+      "start_time": "13:15",
+      "end_time": "14:05",
+      "time": "13:15 – 14:05",
+      "room": "TP-301",
+      "faculty": "Prof. Suresh Kumar",
+      "details": "Software Engineering - 21CSC303J"
+    }
+  ],
+  "attendance": [
+    {
+      "subject": "Data Structures & Algorithms",
+      "course_code": "21CSC204J",
+      "attended": 32,
+      "total": 36,
+      "percentage": 88
+    },
+    {
+      "subject": "Database Management Systems",
+      "course_code": "21CSC210J",
+      "attended": 28,
+      "total": 35,
+      "percentage": 80
+    },
+    {
+      "subject": "Operating Systems",
+      "course_code": "21CSC206J",
+      "attended": 34,
+      "total": 36,
+      "percentage": 94
+    },
+    {
+      "subject": "Computer Networks",
+      "course_code": "21CSC301J",
+      "attended": 25,
+      "total": 34,
+      "percentage": 73
+    },
+    {
+      "subject": "Software Engineering",
+      "course_code": "21CSC303J",
+      "attended": 30,
+      "total": 35,
+      "percentage": 85
+    }
+  ],
+  "marks": [
+    {
+      "subject": "Data Structures & Algorithms",
+      "course_code": "21CSC204J",
+      "assessment": "Cycle Test 1",
+      "obtained": 44,
+      "total": 50,
+      "date": "12 SEP"
+    },
+    {
+      "subject": "Database Management Systems",
+      "course_code": "21CSC210J",
+      "assessment": "Cycle Test 1",
+      "obtained": 41,
+      "total": 50,
+      "date": "14 SEP"
+    },
+    {
+      "subject": "Operating Systems",
+      "course_code": "21CSC206J",
+      "assessment": "Cycle Test 1",
+      "obtained": 46,
+      "total": 50,
+      "date": "16 SEP"
+    },
+    {
+      "subject": "Computer Networks",
+      "course_code": "21CSC301J",
+      "assessment": "Surprise Test",
+      "obtained": 17,
+      "total": 20,
+      "date": "22 SEP"
+    },
+    {
+      "subject": "Software Engineering",
+      "course_code": "21CSC303J",
+      "assessment": "Assignment 1",
+      "obtained": 19,
+      "total": 20,
+      "date": "28 SEP"
+    }
+  ],
+  "raw_tables": {}
+}
