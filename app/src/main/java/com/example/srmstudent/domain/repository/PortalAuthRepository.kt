@@ -7,3 +7,4 @@ interface PortalAuthRepository {
     fun signOut()
     fun getCurrentProfile(): StudentProfile?
 }
+

@@ -17,7 +17,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.srmstudent.domain.model.StudentProfile
-import com.example.srmstudent.domain.repository.PortalAuthRepository
 import com.example.srmstudent.ui.components.*
 import com.example.srmstudent.ui.screens.AttendanceScreen
 import com.example.srmstudent.ui.screens.ClassesScreen
@@ -36,10 +35,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             PortalTheme {
                 val viewModel: PortalViewModel = hiltViewModel()
-                StudentPortalApp(
-                    authRepository = viewModel.authRepository,
-                    viewModel = viewModel
-                )
+                StudentPortalApp(viewModel = viewModel)
             }
         }
     }
@@ -68,11 +64,8 @@ private fun PortalTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun StudentPortalApp(
-    authRepository: PortalAuthRepository,
-    viewModel: PortalViewModel = hiltViewModel()
-) {
-    var profile by remember { mutableStateOf<StudentProfile?>(authRepository.getCurrentProfile()) }
+fun StudentPortalApp(viewModel: PortalViewModel = hiltViewModel()) {
+    val profile by viewModel.currentProfile.collectAsStateWithLifecycle()
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -85,14 +78,14 @@ fun StudentPortalApp(
                 if (!loading) {
                     loading = true
                     error = null
-
                     scope.launch {
                         try {
-                            profile = authRepository.signIn(id, password)
+                            viewModel.signIn(id, password)
+                            // profile StateFlow update will trigger recomposition automatically
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
-                            error = "Sign-in failed. Check your details or try again."
+                            error = "Sign-in failed. Check your Student ID and password."
                         } finally {
                             loading = false
                         }
@@ -106,7 +99,6 @@ fun StudentPortalApp(
             viewModel = viewModel,
             onSignOut = {
                 viewModel.signOut()
-                profile = null
                 error = null
             }
         )
@@ -285,7 +277,43 @@ private fun StudentDashboard(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = Navy)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Navy)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("Loading your data…", color = Muted, fontSize = 14.sp)
+                        }
+                    }
+                }
+
+                is PortalUiState.Empty -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(28.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "Welcome, ${profile.name}!",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = Ink
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "No academic records found yet. Use the refresh button to sync from the portal, or import a data export from the SRM portal website.",
+                                color = Muted,
+                                fontSize = 13.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = { viewModel.refresh(forceRemote = true) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                            ) {
+                                Text("Sync now")
+                            }
+                        }
                     }
                 }
 
@@ -316,21 +344,6 @@ private fun StudentDashboard(
                         ) {
                             Text("Retry")
                         }
-                    }
-                }
-
-                is PortalUiState.Empty -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "No academic records found for this student.",
-                            fontSize = 15.sp,
-                            color = Muted
-                        )
                     }
                 }
 

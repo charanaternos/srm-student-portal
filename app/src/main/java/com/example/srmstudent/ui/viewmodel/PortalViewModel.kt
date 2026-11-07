@@ -7,6 +7,7 @@ import com.example.srmstudent.domain.model.StudentProfile
 import com.example.srmstudent.domain.repository.PortalAuthRepository
 import com.example.srmstudent.domain.repository.SrmRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,13 +29,19 @@ class PortalViewModel @Inject constructor(
 
     private var currentOverview: AcademicOverview? = null
     private var isRefreshing = false
+    private var observeJob: Job? = null
 
     init {
-        observeData()
+        // If a session already exists (app relaunch), start observing immediately
+        if (_currentProfile.value != null) {
+            startObservingData()
+        }
     }
 
-    private fun observeData() {
-        viewModelScope.launch {
+    private fun startObservingData() {
+        observeJob?.cancel()
+        _uiState.value = PortalUiState.Loading
+        observeJob = viewModelScope.launch {
             repository.getAcademicOverview()
                 .catch { e ->
                     _uiState.value = PortalUiState.Error(
@@ -44,21 +51,31 @@ class PortalViewModel @Inject constructor(
                 }
                 .collect { overview ->
                     currentOverview = overview
-                    _uiState.value = PortalUiState.Success(
-                        overview = overview,
-                        isRefreshing = isRefreshing
-                    )
+                    val hasData = overview.classes.isNotEmpty() ||
+                        overview.attendance.isNotEmpty() ||
+                        overview.marks.isNotEmpty()
+
+                    _uiState.value = if (hasData) {
+                        PortalUiState.Success(overview = overview, isRefreshing = isRefreshing)
+                    } else {
+                        PortalUiState.Empty
+                    }
                 }
         }
     }
 
+    /** Call this from the UI login screen. Returns the authenticated [StudentProfile]. */
     suspend fun signIn(studentId: String, password: String): StudentProfile {
         val profile = authRepository.signIn(studentId, password)
         _currentProfile.value = profile
+        // Start (or restart) the DB observer so the UI reacts to the newly populated data
+        startObservingData()
         return profile
     }
 
     fun signOut() {
+        observeJob?.cancel()
+        observeJob = null
         authRepository.signOut()
         _currentProfile.value = null
         currentOverview = null
@@ -76,10 +93,16 @@ class PortalViewModel @Inject constructor(
             isRefreshing = false
 
             result.onFailure { error ->
-                _uiState.value = PortalUiState.Error(
-                    message = error.localizedMessage ?: "Sync from portal failed",
-                    cachedOverview = currentOverview
-                )
+                val current = currentOverview
+                if (current != null) {
+                    // Show cached data with error banner rather than a full error screen
+                    _uiState.value = PortalUiState.Success(current, isRefreshing = false)
+                } else {
+                    _uiState.value = PortalUiState.Error(
+                        message = error.localizedMessage ?: "Sync from portal failed",
+                        cachedOverview = null
+                    )
+                }
             }
         }
     }
