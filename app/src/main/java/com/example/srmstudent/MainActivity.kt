@@ -143,8 +143,11 @@ internal object LocalPortalCache {
     fun clear(context: Context) {
         runCatching { File(context.filesDir, CACHE_FILE).delete() }
         runCatching {
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.removeAllCookies(null)
+            cookieManager.removeSessionCookies(null)
+            cookieManager.flush()
+            android.webkit.WebStorage.getInstance().deleteAllData()
         }
     }
 }
@@ -480,7 +483,7 @@ private fun PortalTheme(content: @Composable () -> Unit) {
 fun StudentPortalApp() {
     val context = LocalContext.current
     var portalData by remember { mutableStateOf(LocalPortalCache.loadData(context)) }
-    var showPortalWebView by remember { mutableStateOf(false) }
+    var showPortalWebView by remember { mutableStateOf(portalData == null) }
 
     if (showPortalWebView) {
         SrmOfficialPortalSignInAndSyncScreen(
@@ -495,7 +498,12 @@ fun StudentPortalApp() {
         )
     } else if (portalData == null) {
         WelcomeStartScreen(
-            onOpenSrmSignIn = { showPortalWebView = true }
+            onOpenSrmSignIn = { showPortalWebView = true },
+            onClearSession = {
+                LocalPortalCache.clear(context)
+                portalData = null
+                showPortalWebView = true
+            }
         )
     } else {
         AuthenticatedPortalScaffold(
@@ -504,6 +512,7 @@ fun StudentPortalApp() {
             onSignOut = {
                 LocalPortalCache.clear(context)
                 portalData = null
+                showPortalWebView = true
             }
         )
     }
@@ -650,8 +659,6 @@ private fun SrmOfficialPortalSignInAndSyncScreen(
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        settings.userAgentString =
-                            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
                         webChromeClient = WebChromeClient()
                         webViewClient = object : WebViewClient() {
@@ -688,7 +695,8 @@ private fun SrmOfficialPortalSignInAndSyncScreen(
 // =========================================================================
 @Composable
 private fun WelcomeStartScreen(
-    onOpenSrmSignIn: () -> Unit
+    onOpenSrmSignIn: () -> Unit,
+    onClearSession: () -> Unit
 ) {
     Surface(modifier = Modifier.fillMaxSize(), color = PageBackground) {
         Box(
@@ -736,6 +744,13 @@ private fun WelcomeStartScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = Navy)
                     ) {
                         Text("Open SRM Sign-In & Auto-Sync")
+                    }
+
+                    OutlinedButton(
+                        onClick = onClearSession,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Clear Stale Cookies & Re-Login")
                     }
                 }
             }
@@ -807,7 +822,7 @@ private fun AuthenticatedPortalScaffold(
                     }
                 }
                 TextButton(onClick = onRefresh) {
-                    Text("↻ Sync", color = Teal, fontWeight = FontWeight.Bold)
+                    Text("🌐 Live Portal", color = Teal, fontWeight = FontWeight.Bold)
                 }
                 TextButton(onClick = onSignOut) {
                     Text("Sign out", color = Muted)
