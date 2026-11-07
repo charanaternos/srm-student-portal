@@ -30,6 +30,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import okhttp3.Dns
 import okhttp3.OkHttpClient
+import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
@@ -41,8 +42,6 @@ import kotlin.math.roundToInt
 
 // =========================================================================
 // 1. PRIMARY & FALLBACK URL CONFIGURATION
-// (Paste your project credentials below, or configure them directly inside the
-// app using the ⚙️ Server Configuration button).
 // =========================================================================
 private const val DEFAULT_SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co/"
 
@@ -120,7 +119,7 @@ interface SupabaseApi {
 // =========================================================================
 // 3. RESILIENT NETWORK CLIENT (IPv4-FIRST + AUTOMATIC FAILOVER)
 // =========================================================================
-private object ApiClient {
+object ApiClient {
     // Campus Wi-Fi networks often have broken IPv6 routing that causes 30s hangs.
     // Preferring IPv4 makes connections on campus Wi-Fi complete in milliseconds.
     private val ipv4FirstDns = object : Dns {
@@ -143,8 +142,23 @@ private object ApiClient {
 
     private val apiCache = mutableMapOf<String, SupabaseApi>()
 
+    fun normalizeBaseUrl(url: String): String {
+        var u = url.trim()
+        if (u.isEmpty()) return ""
+        if (!u.startsWith("http://") && !u.startsWith("https://")) {
+            u = "https://$u"
+        }
+        u = u.removeSuffix("/")
+        // Remove accidental subpaths like /rest/v1 or /auth/v1
+        while (u.endsWith("/rest/v1") || u.endsWith("/auth/v1")) {
+            if (u.endsWith("/rest/v1")) u = u.removeSuffix("/rest/v1").removeSuffix("/")
+            if (u.endsWith("/auth/v1")) u = u.removeSuffix("/auth/v1").removeSuffix("/")
+        }
+        return "$u/"
+    }
+
     fun buildApi(baseUrl: String): SupabaseApi {
-        val cleanUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
+        val cleanUrl = normalizeBaseUrl(baseUrl)
         return apiCache.getOrPut(cleanUrl) {
             Retrofit.Builder()
                 .baseUrl(cleanUrl)
@@ -181,9 +195,47 @@ private object ApiClient {
 }
 
 // =========================================================================
-// 4. LOCAL OFFLINE CACHE (WORKS EVEN WHEN SRM WI-FI BLOCKS ALL INTERNET)
+// 4. DETAILED ERROR FORMATTER (ACCURATE 404, 400, 401 DIAGNOSTICS)
 // =========================================================================
-private object LocalPortalCache {
+fun formatNetworkError(e: Throwable): String {
+    if (e is HttpException) {
+        val code = e.code()
+        val rawBody = runCatching { e.response()?.errorBody()?.string() }.getOrNull().orEmpty()
+        return when (code) {
+            404 -> {
+                when {
+                    rawBody.contains("student_portal_snapshots") || rawBody.contains("PGRST200") || rawBody.contains("42P01") ->
+                        "HTTP 404: Table 'student_portal_snapshots' not found in Supabase. Run the SQL table setup query in your Supabase SQL editor."
+                    rawBody.contains("Cannot GET") || rawBody.contains("Not Found") ->
+                        "HTTP 404: Endpoint not found. Ensure your Supabase URL has no extra subpaths (e.g. use https://<project-ref>.supabase.co)."
+                    else ->
+                        "HTTP 404 (Not Found): The server could not find the requested route. Check your Supabase project URL."
+                }
+            }
+            400 -> {
+                if (rawBody.contains("invalid_grant") || rawBody.contains("Invalid login")) {
+                    "HTTP 400: Invalid login credentials. Verify your email/Student ID and password in Supabase Auth."
+                } else {
+                    "HTTP 400: Bad request ($rawBody)."
+                }
+            }
+            401, 403 -> "HTTP $code: Access denied. Verify your Supabase Anon Key and ensure RLS policy allows read access."
+            500, 502, 503, 504 -> "HTTP $code: Server error. Supabase or your Cloudflare relay may be temporarily unavailable."
+            else -> "Server returned HTTP $code: ${rawBody.ifEmpty { e.message() }}"
+        }
+    }
+    return when (e) {
+        is java.net.UnknownHostException -> "Cannot resolve server host. Check your internet connection or Supabase URL."
+        is java.net.SocketTimeoutException -> "Connection timed out. Campus Wi-Fi may be restricting traffic; try mobile data or Cloudflare relay."
+        is java.io.IOException -> "Network error: ${e.localizedMessage ?: "Connection interrupted"}"
+        else -> "Error: ${e.localizedMessage ?: e.javaClass.simpleName}"
+    }
+}
+
+// =========================================================================
+// 5. LOCAL OFFLINE CACHE (WORKS EVEN WHEN SRM WI-FI BLOCKS ALL INTERNET)
+// =========================================================================
+object LocalPortalCache {
     private const val PREFS_NAME = "srm_portal_session"
     private const val KEY_IDENTIFIER = "student_identifier"
     private const val KEY_USER_UUID = "user_uuid"
@@ -264,7 +316,7 @@ private object LocalPortalCache {
 }
 
 // =========================================================================
-// 5. APP DOMAIN MODELS & FLEXIBLE JSON PARSER
+// 6. APP DOMAIN MODELS & FLEXIBLE JSON PARSER
 // =========================================================================
 data class PortalClassItem(
     val subject: String,
@@ -309,6 +361,34 @@ data class PortalSnapshotUiData(
     val marks: List<PortalMarkItem>
 )
 
+fun getDemoSnapshot(): PortalSnapshotUiData {
+    val classes = listOf(
+        PortalClassItem("Data Structures & Algorithms", "21CSC204J", "1", "24 AUG", "08:45 – 09:35", "TP-402"),
+        PortalClassItem("Database Management Systems", "21CSC205J", "1", "24 AUG", "09:40 – 10:30", "TP-403"),
+        PortalClassItem("Operating Systems", "21CSC206J", "1", "24 AUG", "10:45 – 11:35", "TP-402"),
+        PortalClassItem("Computer Networks", "21CSC301J", "1", "24 AUG", "11:40 – 12:30", "TP-301")
+    )
+    val attendance = listOf(
+        PortalAttendanceItem("Data Structures & Algorithms", "21CSC204J", 28, 30),
+        PortalAttendanceItem("Database Management Systems", "21CSC205J", 25, 30),
+        PortalAttendanceItem("Operating Systems", "21CSC206J", 27, 30),
+        PortalAttendanceItem("Computer Networks", "21CSC301J", 22, 30)
+    )
+    val marks = listOf(
+        PortalMarkItem("Data Structures & Algorithms", "Cycle Test 1", 46.0, 50.0, "46/50"),
+        PortalMarkItem("Database Management Systems", "Cycle Test 1", 42.0, 50.0, "42/50"),
+        PortalMarkItem("Operating Systems", "Surprise Test", 18.0, 20.0, "18/20"),
+        PortalMarkItem("Computer Networks", "Assignment 1", 10.0, 10.0, "10/10")
+    )
+    return PortalSnapshotUiData(
+        snapshotDate = "2026-11-07 (Demo Preview)",
+        dayOrder = "1",
+        classes = classes,
+        attendance = attendance,
+        marks = marks
+    )
+}
+
 private fun JsonObject.findString(vararg keys: String): String? {
     val normalizedMap = entrySet().associate { (k, v) ->
         k.lowercase().replace(Regex("[^a-z0-9]"), "") to v
@@ -332,7 +412,7 @@ private fun String?.toIntSafe(): Int? =
 private fun String?.toDoubleSafe(): Double? =
     this?.replace(Regex("[^0-9.]"), "")?.toDoubleOrNull()
 
-private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
+fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
     val root = row.data ?: JsonObject()
 
     val dayOrder = root.findString("day_order", "dayorder", "dayOrder")
@@ -454,7 +534,7 @@ private fun parseSnapshotRow(row: SnapshotRow): PortalSnapshotUiData {
 }
 
 // =========================================================================
-// 6. UI STATE & MAIN APP COMPOSABLE
+// 7. UI STATE & MAIN APP COMPOSABLE
 // =========================================================================
 private enum class AppTab(val label: String, val symbol: String) {
     Home("Home", "⌂"),
@@ -529,10 +609,11 @@ fun StudentPortalApp() {
                 throw e
             } catch (e: Exception) {
                 // If SRM Wi-Fi blocks the connection or has captive portal redirects, keep showing cached data!
+                val detailedError = formatNetworkError(e)
                 errorMessage = if (portalData != null) {
-                    "Offline / SRM Wi-Fi restricted — showing last synced data (${portalData?.snapshotDate})."
+                    "Offline / Restricted — showing last synced data (${portalData?.snapshotDate}). ($detailedError)"
                 } else {
-                    "Network unreachable (${e.javaClass.simpleName}). Configure FALLBACK_GATEWAY_URL or switch to mobile data."
+                    detailedError
                 }
             } finally {
                 isLoading = false
@@ -542,7 +623,7 @@ fun StudentPortalApp() {
 
     // Auto-refresh in the background when the app opens if already signed in
     LaunchedEffect(isSignedIn) {
-        if (isSignedIn) {
+        if (isSignedIn && accessToken != "DEMO_TOKEN") {
             fetchPortalSnapshot(accessToken)
         }
     }
@@ -552,6 +633,15 @@ fun StudentPortalApp() {
             isLoading = isLoading,
             errorMessage = errorMessage,
             onOpenSettings = { showSettingsDialog = true },
+            onPreviewDemo = {
+                val demoData = getDemoSnapshot()
+                portalData = demoData
+                loggedInIdentifier = "Demo Student (CSE)"
+                loggedInUserId = "demo-preview"
+                accessToken = "DEMO_TOKEN"
+                isSignedIn = true
+                errorMessage = null
+            },
             onSignIn = { rawInput, password ->
                 if (supabaseUrl.contains("YOUR_PROJECT_ID") || supabaseAnonKey.contains("YOUR_SUPABASE")) {
                     errorMessage = "Please configure your Supabase URL & Anon Key (click ⚙️ Server Configuration below)."
@@ -610,8 +700,8 @@ fun StudentPortalApp() {
                                 LocalPortalCache.saveSnapshot(context, latestRow)
                                 portalData = parseSnapshotRow(latestRow)
                             }
-                        } catch (_: Exception) {
-                            errorMessage = "Sign-in failed (${e.javaClass.simpleName}). Check your credentials or network."
+                        } catch (fallbackError: Exception) {
+                            errorMessage = "Sign-in failed: ${formatNetworkError(fallbackError)}"
                         }
                     } finally {
                         isLoading = false
@@ -626,7 +716,13 @@ fun StudentPortalApp() {
             data = portalData,
             isLoading = isLoading,
             errorMessage = errorMessage,
-            onRefresh = { fetchPortalSnapshot(accessToken) },
+            onRefresh = {
+                if (accessToken == "DEMO_TOKEN") {
+                    portalData = getDemoSnapshot()
+                } else {
+                    fetchPortalSnapshot(accessToken)
+                }
+            },
             onSignOut = {
                 LocalPortalCache.clearAll(context)
                 accessToken = null
@@ -706,13 +802,14 @@ fun StudentPortalApp() {
 }
 
 // =========================================================================
-// 7. SCREENS (LOGIN, DASHBOARD, TIMETABLE, ATTENDANCE, MARKS)
+// 8. SCREENS (LOGIN, DASHBOARD, TIMETABLE, ATTENDANCE, MARKS)
 // =========================================================================
 @Composable
 private fun LoginScreen(
     isLoading: Boolean,
     errorMessage: String?,
     onOpenSettings: () -> Unit,
+    onPreviewDemo: () -> Unit,
     onSignIn: (String, String) -> Unit
 ) {
     var identifier by remember { mutableStateOf("") }
@@ -732,7 +829,7 @@ private fun LoginScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(24.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Text(
                         "SRM STUDENT PORTAL",
@@ -786,6 +883,14 @@ private fun LoginScreen(
                         } else {
                             Text("Sign In")
                         }
+                    }
+
+                    OutlinedButton(
+                        onClick = onPreviewDemo,
+                        enabled = !isLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Preview Demo Mode (Offline)", color = Navy, fontWeight = FontWeight.SemiBold)
                     }
 
                     TextButton(
@@ -884,7 +989,7 @@ private fun AuthenticatedPortalScaffold(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFFFDECEC))
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Data Notice", color = Danger, fontWeight = FontWeight.Bold)
+                        Text("Notice", color = Danger, fontWeight = FontWeight.Bold)
                         Text(msg, color = Ink, fontSize = 13.sp)
                         userUuid?.let {
                             Text("Logged-in User UUID: $it", color = Muted, fontSize = 11.sp)
