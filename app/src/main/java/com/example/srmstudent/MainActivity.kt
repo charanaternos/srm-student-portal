@@ -18,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -462,12 +463,22 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                 colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.12f))
             ) {
                 Column(
-                    modifier = Modifier.padding(24.dp),
+                    modifier = Modifier.padding(28.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Text("SRM STUDENT PORTAL", color = Navy, fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-                    Text("Sign In", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Box(
+                        modifier = Modifier
+                            .size(58.dp)
+                            .clip(CircleShape)
+                            .background(Brush.linearGradient(listOf(Color(0xFF67E8F9), Color(0xFF2DD4BF)))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("SRM", color = Color(0xFF073B4C), fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                    Text("SRM STUDENT PORTAL", color = Color(0xFFB8F3F0), fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                    Text("Your campus, at a glance.", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text("Sign in securely to sync your academic dashboard.", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
 
                     OutlinedTextField(
                         value = id,
@@ -475,6 +486,15 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                         label = { Text("NetID (without @srmist.edu.in)") },
                         placeholder = { Text("e.g. vv8364") },
                         singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF67E8F9),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                            focusedLabelColor = Color(0xFFB8F3F0),
+                            unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF67E8F9)
+                        ),
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -485,22 +505,39 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF67E8F9),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                            focusedLabelColor = Color(0xFFB8F3F0),
+                            unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF67E8F9)
+                        ),
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Button(
+                    OutlinedButton(
                         onClick = { onLogin(id, pass) },
                         enabled = id.isNotBlank() && pass.isNotBlank(),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            Brush.linearGradient(listOf(Color(0xFF67E8F9), Color(0xFF2DD4BF)))
+                        ),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.White.copy(alpha = 0.06f),
+                            contentColor = Color.White,
+                            disabledContainerColor = Color.White.copy(alpha = 0.03f),
+                            disabledContentColor = Color.White.copy(alpha = 0.35f)
+                        )
                     ) {
-                        Text("Open SRM Portal & Auto-Fill")
+                        Text("Open SRM Portal", fontWeight = FontWeight.Bold)
                     }
 
                     Text(
-                        "Opens SRM's official login page and automatically fills in your NetID and password. " +
-                            "You only need to type the CAPTCHA shown on screen and tap Login.",
-                        color = Muted, fontSize = 11.sp
+                        "The official SRM login page opens next. Your credentials are filled in, and you complete the CAPTCHA before signing in.",
+                        color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp, lineHeight = 16.sp
                     )
                 }
             }
