@@ -1,8 +1,11 @@
 package com.example.srmstudent
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -11,10 +14,12 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -483,36 +488,33 @@ private fun PortalTheme(content: @Composable () -> Unit) {
 fun StudentPortalApp() {
     val context = LocalContext.current
     var portalData by remember { mutableStateOf(LocalPortalCache.loadData(context)) }
-    var showPortalWebView by remember { mutableStateOf(portalData == null) }
+    var showPortalWebView by remember { mutableStateOf(false) }
+    var loginHint by remember { mutableStateOf("") }
 
     if (showPortalWebView) {
         SrmOfficialPortalSignInAndSyncScreen(
+            loginHint = loginHint,
             onSyncComplete = { rawJson, parsedData ->
                 LocalPortalCache.saveJson(context, rawJson)
                 portalData = parsedData
                 showPortalWebView = false
             },
-            onCancel = {
-                showPortalWebView = false
-            }
+            onCancel = { showPortalWebView = false }
         )
     } else if (portalData == null) {
         WelcomeStartScreen(
-            onOpenSrmSignIn = { showPortalWebView = true },
-            onClearSession = {
-                LocalPortalCache.clear(context)
-                portalData = null
+            onOpenSrmSignIn = { id ->
+                loginHint = id
                 showPortalWebView = true
             }
         )
     } else {
         AuthenticatedPortalScaffold(
             data = portalData!!,
-            onRefresh = { showPortalWebView = true },
+            onRefresh = { loginHint = ""; showPortalWebView = true },
             onSignOut = {
                 LocalPortalCache.clear(context)
                 portalData = null
-                showPortalWebView = true
             }
         )
     }
@@ -521,121 +523,155 @@ fun StudentPortalApp() {
 // =========================================================================
 // 6. OFFICIAL SRM SIGN-IN & AUTO-EXTRACTION SCREEN
 // =========================================================================
+private fun prefillIdJs(rawId: String): String {
+    val id = if (rawId.contains("@")) rawId else "$rawId@srmist.edu.in"
+    return "(function(){var v=" + JSONObject.quote(id) + ";" +
+        "function f(d){try{var u=d.querySelector('#login_id,input[name=\"LOGIN_ID\"],input[type=\"email\"]');" +
+        "if(u&&!u.value){u.value=v;u.dispatchEvent(new Event('input',{bubbles:true}));}}catch(e){}}" +
+        "f(document);" +
+        "Array.from(document.querySelectorAll('iframe')).forEach(function(fr){" +
+        "try{f(fr.contentDocument);}catch(e){}});})();"
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun SrmOfficialPortalSignInAndSyncScreen(
+    loginHint: String,
     onSyncComplete: (String, PortalSnapshotUiData) -> Unit,
     onCancel: () -> Unit
 ) {
-    BackHandler {
-        onCancel()
-    }
-
-    var statusText by remember {
-        mutableStateOf("Sign in with your SRM NetID (e.g., ab1234@srmist.edu.in, NOT RA... Reg No)")
-    }
+    val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var mergedJson by remember { mutableStateOf(JSONObject()) }
-    var navigatedToAttendance by remember { mutableStateOf(false) }
+    val collected = remember { JSONObject() }
+    var attendanceCount by remember { mutableStateOf(0) }
+    var marksCount by remember { mutableStateOf(0) }
+    var classesCount by remember { mutableStateOf(0) }
+    var signedIn by remember { mutableStateOf(false) }
 
-    // Helper function to trigger immediate extraction
-    fun runExtraction(webView: WebView, forceCompleteIfAnyData: Boolean = false) {
-        webView.evaluateJavascript(JS_EXTRACT_SRM_DATA) { rawResult ->
-            if (rawResult.isNullOrBlank() || rawResult == "null") return@evaluateJavascript
+    fun mergeFrom(current: JSONObject) {
+        signedIn = current.optBoolean("isLoggedIn", false) || signedIn
+        for (key in listOf("studentName", "regNumber", "department", "semester", "dayOrder")) {
+            val v = current.optString(key)
+            if (v.isNotBlank()) collected.put(key, v)
+        }
+        for (key in listOf("attendance", "marks", "classes")) {
+            val arr = current.optJSONArray(key)
+            if (arr != null && arr.length() > 0) collected.put(key, arr)
+        }
+        attendanceCount = collected.optJSONArray("attendance")?.length() ?: 0
+        marksCount = collected.optJSONArray("marks")?.length() ?: 0
+        classesCount = collected.optJSONArray("classes")?.length() ?: 0
+    }
+
+    fun extract(webView: WebView) {
+        webView.evaluateJavascript(JS_EXTRACT_SRM_DATA) { raw ->
+            if (raw.isNullOrBlank() || raw == "null") return@evaluateJavascript
             runCatching {
-                val unescaped = JSONTokener(rawResult).nextValue().toString()
-                val current = JSONObject(unescaped)
-                val isLoggedIn = current.optBoolean("isLoggedIn", false)
-
-                for (key in listOf("studentName", "regNumber", "department", "semester", "dayOrder")) {
-                    val v = current.optString(key)
-                    if (v.isNotBlank()) mergedJson.put(key, v)
-                }
-
-                val att = current.optJSONArray("attendance")
-                val mrk = current.optJSONArray("marks")
-                val cls = current.optJSONArray("classes")
-
-                if (att != null && att.length() > 0) mergedJson.put("attendance", att)
-                if (mrk != null && mrk.length() > 0) mergedJson.put("marks", mrk)
-                if (cls != null && cls.length() > 0) mergedJson.put("classes", cls)
-
-                val hasAttendance = (mergedJson.optJSONArray("attendance")?.length() ?: 0) > 0
-
-                if (hasAttendance || (forceCompleteIfAnyData && isLoggedIn)) {
-                    mergedJson.put(
-                        "syncedAt",
-                        SimpleDateFormat("dd MMM, hh:mm a", Locale.ENGLISH).format(Date())
-                    )
-                    val parsed = parsePortalJson(mergedJson)
-                    onSyncComplete(mergedJson.toString(), parsed)
-                } else if (isLoggedIn && !navigatedToAttendance) {
-                    navigatedToAttendance = true
-                    statusText = "Signed in! Automatically opening My Attendance & Marks..."
-                    val navJs = """
-                        (function() {
-                            var links = Array.from(document.querySelectorAll('a'));
-                            var attLink = links.find(function(a) {
-                                var t = (a.innerText || '').toLowerCase();
-                                var h = (a.getAttribute('href') || '').toLowerCase();
-                                return t.indexOf('my attendance') !== -1 || h.indexOf('my_attendance') !== -1;
-                            });
-                            if (attLink) {
-                                attLink.click();
-                            } else {
-                                window.location.hash = '#Page:My_Attendance';
-                            }
-                        })();
-                    """.trimIndent()
-                    webView.evaluateJavascript(navJs, null)
-                }
+                val json = JSONTokener(raw).nextValue().toString()
+                mergeFrom(JSONObject(json))
             }
         }
     }
 
-    // Passive observer: watches for login completion & table rendering without interfering with typing
+    fun openMenu(webView: WebView, keyword: String) {
+        val js = "(function(){var k=" + JSONObject.quote(keyword) + ";" +
+            "var links=Array.from(document.querySelectorAll('a'));" +
+            "var t=links.find(function(a){return (a.innerText||'').toLowerCase().indexOf(k)!==-1;});" +
+            "if(t){t.click();}})();"
+        webView.evaluateJavascript(js, null)
+    }
+
+    fun finishAndSave() {
+        if (attendanceCount + marksCount + classesCount == 0) {
+            Toast.makeText(
+                context,
+                "No data found yet. Open the Attendance or Timetable page first.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        collected.put(
+            "syncedAt",
+            SimpleDateFormat("dd MMM, hh:mm a", Locale.ENGLISH).format(Date())
+        )
+        onSyncComplete(collected.toString(), parsePortalJson(collected))
+    }
+
+    fun openInChrome() {
+        val uri = Uri.parse(SRM_PORTAL_URL)
+        try {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, uri).setPackage("com.android.chrome")
+            )
+        } catch (e: ActivityNotFoundException) {
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+        }
+    }
+
+    BackHandler {
+        val wv = webViewRef
+        if (wv != null && wv.canGoBack()) wv.goBack() else onCancel()
+    }
+
+    // Passive reader: only reads the page, never types or clicks for you.
     LaunchedEffect(webViewRef) {
-        val webView = webViewRef ?: return@LaunchedEffect
+        val wv = webViewRef ?: return@LaunchedEffect
         while (true) {
             delay(2000)
-            runExtraction(webView, forceCompleteIfAnyData = false)
+            extract(wv)
         }
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = PageBackground) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar with clear instructions & manual "Done / Sync Now" button
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Navy)
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "SRM Academia Portal",
+                        "SRM Academia",
                         color = Color.White,
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(
-                        onClick = { webViewRef?.let { runExtraction(it, forceCompleteIfAnyData = true) } }
-                    ) {
-                        Text("Import Page Now", color = Teal, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
                     TextButton(onClick = onCancel) {
-                        Text("Close", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                        Text("Close", color = Color.White.copy(alpha = 0.85f))
                     }
                 }
                 Text(
-                    statusText,
+                    if (signedIn) {
+                        "Signed in. Collected: $attendanceCount attendance, " +
+                            "$classesCount classes, $marksCount marks"
+                    } else {
+                        "Sign in below. Then open Attendance and Timetable."
+                    },
                     color = Color.White.copy(alpha = 0.9f),
                     fontSize = 12.sp
                 )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    TextButton(onClick = { openInChrome() }) {
+                        Text("Open in Chrome", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { webViewRef?.let { openMenu(it, "attendance") } }) {
+                        Text("Attendance", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { webViewRef?.let { openMenu(it, "time table") } }) {
+                        Text("Timetable", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { webViewRef?.let { extract(it) } }) {
+                        Text("Import this page", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { finishAndSave() }) {
+                        Text("Save & Finish", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
             }
 
             AndroidView(
@@ -645,41 +681,29 @@ private fun SrmOfficialPortalSignInAndSyncScreen(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        val cookieManager = CookieManager.getInstance()
-                        cookieManager.setAcceptCookie(true)
-                        cookieManager.setAcceptThirdPartyCookies(this, true)
+                        val cookies = CookieManager.getInstance()
+                        cookies.setAcceptCookie(true)
+                        cookies.setAcceptThirdPartyCookies(this, true)
 
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.databaseEnabled = true
-                        settings.loadsImagesAutomatically = true
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
                         settings.setSupportZoom(true)
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
                         webChromeClient = WebChromeClient()
                         webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                            }
-
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
                                 CookieManager.getInstance().flush()
-                                if (view != null) {
-                                    runExtraction(view, forceCompleteIfAnyData = false)
+                                if (loginHint.isNotBlank()) {
+                                    view?.evaluateJavascript(prefillIdJs(loginHint), null)
                                 }
+                                view?.let { extract(it) }
                             }
-
-                            override fun shouldOverrideUrlLoading(
-                                view: WebView?,
-                                request: WebResourceRequest?
-                            ): Boolean = false
                         }
-
                         loadUrl(SRM_PORTAL_URL)
                         webViewRef = this
                     }
@@ -695,14 +719,13 @@ private fun SrmOfficialPortalSignInAndSyncScreen(
 // =========================================================================
 @Composable
 private fun WelcomeStartScreen(
-    onOpenSrmSignIn: () -> Unit,
-    onClearSession: () -> Unit
+    onOpenSrmSignIn: (String) -> Unit
 ) {
+    var loginId by remember { mutableStateOf("") }
+
     Surface(modifier = Modifier.fillMaxSize(), color = PageBackground) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
+            modifier = Modifier.fillMaxSize().padding(20.dp),
             contentAlignment = Alignment.Center
         ) {
             Card(
@@ -714,43 +737,31 @@ private fun WelcomeStartScreen(
                     modifier = Modifier.padding(24.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    Text("SRM STUDENT PORTAL", color = Navy, fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Text("Connect your SRM account", color = Ink, fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold)
                     Text(
-                        "SRM STUDENT PORTAL",
-                        color = Navy,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        "Enter your ID (optional) and it will be filled in on SRM's sign-in page. " +
+                            "You type the password and CAPTCHA on SRM's page yourself.",
+                        color = Muted, fontSize = 13.sp
                     )
-                    Text(
-                        "Connect Your SRM Account",
-                        color = Ink,
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        "Important: Sign in using your SRM NetID email (e.g., ab1234@srmist.edu.in). Do not enter your RA... Registration Number as your email, or SRM will report 'Account does not exist'.",
-                        color = Muted,
-                        fontSize = 13.sp
-                    )
-                    Text(
-                        "Once you sign in (and complete CAPTCHA if shown), your Attendance, Timetable, Rooms, and Internal Marks will be imported and saved offline automatically.",
-                        color = Muted,
-                        fontSize = 13.sp
+
+                    OutlinedTextField(
+                        value = loginId,
+                        onValueChange = { loginId = it.trim() },
+                        label = { Text("SRM ID") },
+                        placeholder = { Text("e.g. vv1234") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
 
                     Button(
-                        onClick = onOpenSrmSignIn,
+                        onClick = { onOpenSrmSignIn(loginId) },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = Navy)
                     ) {
-                        Text("Open SRM Sign-In & Auto-Sync")
-                    }
-
-                    OutlinedButton(
-                        onClick = onClearSession,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Clear Stale Cookies & Re-Login")
+                        Text("Open SRM Sign-In")
                     }
                 }
             }
