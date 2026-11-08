@@ -17,6 +17,8 @@ app/build
 local.properties
 *.env
 .env
+.env.*
+.env*.local
 # Keep example files
 !.env.example
 
