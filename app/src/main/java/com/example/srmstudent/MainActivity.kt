@@ -13,7 +13,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -215,50 +217,159 @@ internal fun slotTime(s: String): String {
 
 // ─── JAVASCRIPT: AUTO-LOGIN + EXTRACT ──────────────────────────────────────
 
+
+fun getDemoJson(): String {
+    return JSONObject().apply {
+        put("studentName", "Charan Vadla")
+        put("regNumber", "RA2311003010999")
+        put("department", "Computer Science")
+        put("semester", "4")
+        put("dayOrder", "2")
+        put("syncedAt", SimpleDateFormat("dd MMM, hh:mm a", Locale.ENGLISH).format(Date()))
+        put("attendance", JSONArray().apply {
+            put(JSONObject().apply {
+                put("subject", "Design and Analysis of Algorithms")
+                put("code", "21CSC204J")
+                put("conducted", 32)
+                put("attended", 30)
+                put("percentage", "93.8%")
+            })
+            put(JSONObject().apply {
+                put("subject", "Operating Systems")
+                put("code", "21CSC205J")
+                put("conducted", 30)
+                put("attended", 26)
+                put("percentage", "86.7%")
+            })
+            put(JSONObject().apply {
+                put("subject", "Database Management Systems")
+                put("code", "21CSC206J")
+                put("conducted", 30)
+                put("attended", 29)
+                put("percentage", "96.7%")
+            })
+            put(JSONObject().apply {
+                put("subject", "Computer Networks")
+                put("code", "21CSC207J")
+                put("conducted", 28)
+                put("attended", 24)
+                put("percentage", "85.7%")
+            })
+        })
+        put("classes", JSONArray().apply {
+            put(JSONObject().apply {
+                put("subject", "Design and Analysis of Algorithms")
+                put("code", "21CSC204J")
+                put("slot", "A1")
+                put("room", "TP-402")
+                put("faculty", "Dr. K. Sharma")
+            })
+            put(JSONObject().apply {
+                put("subject", "Operating Systems")
+                put("code", "21CSC205J")
+                put("slot", "B2")
+                put("room", "TP-501")
+                put("faculty", "Prof. R. Raman")
+            })
+            put(JSONObject().apply {
+                put("subject", "Database Management Systems")
+                put("code", "21CSC206J")
+                put("slot", "C1")
+                put("room", "UB-303")
+                put("faculty", "Dr. S. Nair")
+            })
+            put(JSONObject().apply {
+                put("subject", "Computer Networks")
+                put("code", "21CSC207J")
+                put("slot", "D")
+                put("room", "TP-405")
+                put("faculty", "Dr. A. Verma")
+            })
+        })
+        put("marks", JSONArray().apply {
+            put(JSONObject().apply {
+                put("subject", "Design and Analysis of Algorithms")
+                put("code", "21CSC204J")
+                put("assessment", "Cycle Test 1")
+                put("obtained", 24.0)
+                put("total", 25.0)
+                put("rawScore", "24 / 25")
+            })
+            put(JSONObject().apply {
+                put("subject", "Operating Systems")
+                put("code", "21CSC205J")
+                put("assessment", "Cycle Test 1")
+                put("obtained", 22.5)
+                put("total", 25.0)
+                put("rawScore", "22.5 / 25")
+            })
+            put(JSONObject().apply {
+                put("subject", "Database Management Systems")
+                put("code", "21CSC206J")
+                put("assessment", "Cycle Test 1")
+                put("obtained", 25.0)
+                put("total", 25.0)
+                put("rawScore", "25 / 25")
+            })
+            put(JSONObject().apply {
+                put("subject", "Computer Networks")
+                put("code", "21CSC207J")
+                put("assessment", "Cycle Test 1")
+                put("obtained", 21.0)
+                put("total", 25.0)
+                put("rawScore", "21 / 25")
+            })
+        })
+    }.toString()
+}
+
 private val JS_AUTO_LOGIN = """
 (function(){
-  var id = %ID%;
+  var rawId = %ID%;
   var pw = %PW%;
+  var isSp = location.hostname.indexOf('sp.srmist.edu.in') !== -1;
+  var cleanId = isSp ? rawId.replace(/@.*$/, '').trim() : rawId.trim();
+
   function fill(doc) {
     if (!doc) return;
     var inputs = Array.from(doc.querySelectorAll('input'));
-    var idInput = inputs.find(function(i) {
-      var n = ((i.name||'') + (i.id||'')).toLowerCase();
-      var t = (i.type||'text').toLowerCase();
-      return (n.indexOf('net') !== -1 || n.indexOf('login') !== -1 ||
-              n.indexOf('user') !== -1 || n.indexOf('id') !== -1 ||
-              n.indexOf('email') !== -1 || n.indexOf('username') !== -1) &&
-             (t === 'text' || t === 'email') && i.offsetParent !== null;
-    });
-    if (!idInput) {
-      idInput = inputs.find(function(i) {
-        var t = (i.type||'text').toLowerCase();
+    var idInput = doc.querySelector('#username, input[name="username"], input[name="login_id"]') ||
+      inputs.find(function(i) {
         var n = ((i.name||'') + (i.id||'')).toLowerCase();
-        return (t === 'text' || t === 'email') &&
-               n.indexOf('cap') === -1 && n.indexOf('verif') === -1 &&
-               i.offsetParent !== null;
+        var t = (i.type||'text').toLowerCase();
+        return (n.indexOf('net') !== -1 || n.indexOf('login') !== -1 ||
+                n.indexOf('user') !== -1 || n.indexOf('email') !== -1) &&
+               (t === 'text' || t === 'email') && i.offsetParent !== null;
       });
-    }
-    var pwInput = inputs.find(function(i) {
-      return (i.type||'').toLowerCase() === 'password' && i.offsetParent !== null;
-    });
-    if (idInput && !idInput.value) {
-      idInput.value = id;
+
+    var pwInput = doc.querySelector('#password, input[name="password"], input[type="password"]') ||
+      inputs.find(function(i) {
+        return (i.type||'').toLowerCase() === 'password' && i.offsetParent !== null;
+      });
+
+    var capInput = doc.querySelector('#captcha, input[name="captcha"]') ||
+      inputs.find(function(i) {
+        var n = ((i.name||'') + (i.id||'')).toLowerCase();
+        return (n.indexOf('cap') !== -1 || n.indexOf('verif') !== -1) && i.offsetParent !== null;
+      });
+
+    if (idInput && (!idInput.value || idInput.value !== cleanId)) {
+      idInput.value = cleanId;
       idInput.dispatchEvent(new Event('input', {bubbles:true}));
       idInput.dispatchEvent(new Event('change', {bubbles:true}));
     }
-    if (pwInput && !pwInput.value) {
+    if (pwInput && (!pwInput.value || pwInput.value !== pw)) {
       pwInput.value = pw;
       pwInput.dispatchEvent(new Event('input', {bubbles:true}));
       pwInput.dispatchEvent(new Event('change', {bubbles:true}));
     }
-    if (idInput && pwInput && idInput.value && pwInput.value) {
-      var form = pwInput.closest('form');
-      if (form) {
-        form.submit();
-      } else {
-        var btn = doc.querySelector('input[type="submit"], button[type="submit"], #btnLogin, #loginBtn');
-        if (btn) btn.click();
+
+    if (capInput) {
+      if (!capInput.value) {
+        capInput.focus();
+      } else if (capInput.value.length >= 4) {
+        var btn = doc.querySelector('#btnLogin, button[type="submit"], input[type="submit"]');
+        if (btn && !btn.disabled) btn.click();
       }
     }
   }
@@ -416,6 +527,12 @@ fun StudentPortalApp() {
                 netId = id.trim()
                 pw = pass
                 showWebView = true
+            },
+            onDemo = {
+                val demo = getDemoJson()
+                Cache.save(ctx, demo)
+                data = parseJson(JSONObject(demo))
+                showLogin = false
             }
         )
     } else if (data != null) {
@@ -434,7 +551,10 @@ fun StudentPortalApp() {
 // ─── NATIVE LOGIN SCREEN ────────────────────────────────────────────────────
 
 @Composable
-private fun LoginScreen(onLogin: (String, String) -> Unit) {
+private fun LoginScreen(
+    onLogin: (String, String) -> Unit,
+    onDemo: () -> Unit
+) {
     var id by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
 
@@ -480,13 +600,20 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = Navy)
                     ) {
-                        Text("Auto Login & Fetch Data")
+                        Text("Auto-Fill & Sign In")
+                    }
+
+                    OutlinedButton(
+                        onClick = onDemo,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Navy)
+                    ) {
+                        Text("Preview Demo Mode (Offline)")
                     }
 
                     Text(
-                        "The app fills your NetID and password into SRM's page " +
-                            "and clicks login automatically. If a CAPTCHA appears, " +
-                            "solve it on the page. Your password is never stored.",
+                        "The app automatically pre-fills your NetID and password on SRM's official login page. " +
+                            "Type the CAPTCHA letters shown on screen to complete sign-in. Your credentials are never stored.",
                         color = Muted, fontSize = 11.sp
                     )
                 }
@@ -505,6 +632,7 @@ private fun AutoLoginWebView(
     onDone: (String, PortalData) -> Unit,
     onCancel: () -> Unit
 ) {
+    BackHandler { onCancel() }
     var status by remember { mutableStateOf("Opening SRM portal...") }
     var wv by remember { mutableStateOf<WebView?>(null) }
     val merged = remember { JSONObject() }
@@ -615,7 +743,16 @@ private fun AutoLoginWebView(
                     "Collected: $attC attendance  •  $clsC classes  •  $mkC marks",
                     color = Teal, fontSize = 12.sp, fontWeight = FontWeight.Bold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    TextButton(onClick = { wv?.loadUrl(SRM_LOGIN_URL) }) {
+                        Text("SRM Portal", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { wv?.loadUrl("https://academia.srmist.edu.in/") }) {
+                        Text("Academia", color = Color.White, fontSize = 12.sp)
+                    }
                     TextButton(onClick = { navigateTo("attendance") }) {
                         Text("Attendance", color = Color.White, fontSize = 12.sp)
                     }
@@ -626,7 +763,7 @@ private fun AutoLoginWebView(
                         Text("Import", color = Color.White, fontSize = 12.sp)
                     }
                     TextButton(onClick = { saveAndFinish() }) {
-                        Text("Save", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("Save & Finish", color = Teal, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
             }
