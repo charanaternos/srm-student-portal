@@ -138,6 +138,35 @@ private object Cache {
     }
 }
 
+// ─── CREDENTIAL STORE ───────────────────────────────────────────────────────
+
+private object CredStore {
+    private const val PREFS = "srm_creds"
+    private const val KEY_ID = "net_id"
+    private const val KEY_PW = "password"
+
+    fun save(ctx: Context, id: String, pass: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ID, id.trim())
+            .putString(KEY_PW, pass)
+            .apply()
+    }
+
+    fun getId(ctx: Context): String =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ID, "") ?: ""
+
+    fun getPw(ctx: Context): String =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_PW, "") ?: ""
+
+    fun hasCreds(ctx: Context): Boolean =
+        getId(ctx).isNotBlank() && getPw(ctx).isNotBlank()
+
+    fun clear(ctx: Context) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+}
+
 // ─── JSON PARSER ────────────────────────────────────────────────────────────
 
 private fun parseJson(root: JSONObject): PortalData {
@@ -254,6 +283,7 @@ private val JS_AUTO_LOGIN = """
         return (n.indexOf('cap') !== -1 || n.indexOf('verif') !== -1) && i.offsetParent !== null;
       });
 
+    // ── 1. Auto-fill credentials ──────────────────────────────────
     if (idInput && (!idInput.value || idInput.value !== cleanId)) {
       idInput.value = cleanId;
       idInput.dispatchEvent(new Event('input', {bubbles:true}));
@@ -263,6 +293,73 @@ private val JS_AUTO_LOGIN = """
       pwInput.value = pw;
       pwInput.dispatchEvent(new Event('input', {bubbles:true}));
       pwInput.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+
+    // ── 2. Hide NetID and Password to present ONLY the CAPTCHA ────
+    try {
+      if (idInput) {
+        var uGroup = idInput.closest('.form-group') || idInput.parentElement;
+        if (uGroup) uGroup.style.setProperty('display', 'none', 'important');
+      }
+      if (pwInput) {
+        var pGroup = pwInput.closest('.form-group') || pwInput.parentElement;
+        if (pGroup) pGroup.style.setProperty('display', 'none', 'important');
+      }
+      var forgotLink = doc.querySelector('a[href*="resetpassword"]');
+      if (forgotLink) {
+        var fCont = forgotLink.closest('.alignRight') || forgotLink.parentElement;
+        if (fCont) fCont.style.setProperty('display', 'none', 'important');
+      }
+    } catch(e) {}
+
+    // ── 3. Inject Focused CAPTCHA Card Styling ──────────────────
+    if (!doc.getElementById('srm_captcha_only_style')) {
+      var st = doc.createElement('style');
+      st.id = 'srm_captcha_only_style';
+      st.textContent = [
+        'body { background: #0E2947 !important; padding: 14px 10px !important; min-height: 100vh !important; }',
+        'nav, footer, .card-header, header, .fa-user, .fa-key { display: none !important; }',
+        '.container, .card, .card-body, .col-xl-5, .col-lg-6, .col-md-8 {',
+        '  background: transparent !important; border: none !important; box-shadow: none !important;',
+        '  padding: 0 !important; margin: 0 auto !important; max-width: 100% !important; width: 100% !important;',
+        '}',
+        '#login_form {',
+        '  background: #ffffff !important; border-radius: 24px !important; padding: 24px 20px !important;',
+        '  box-shadow: 0 16px 40px rgba(0,0,0,0.3) !important; max-width: 380px !important; width: 95% !important; margin: 12px auto !important;',
+        '}',
+        '#secure_captcha {',
+        '  border-radius: 12px !important; border: 2px solid #E2E8F0 !important; background: #F8FAFC !important;',
+        '  padding: 4px !important; margin: 0 auto 12px auto !important; display: block !important;',
+        '  min-height: 52px !important; width: 100% !important; object-fit: contain !important;',
+        '}',
+        '#captcha {',
+        '  font-size: 22px !important; font-weight: 800 !important; letter-spacing: 5px !important;',
+        '  text-align: center !important; text-transform: uppercase !important; height: 54px !important;',
+        '  border-radius: 14px !important; border: 2px solid #0284C7 !important; background: #F0F9FF !important;',
+        '  color: #0369A1 !important; width: 100% !important;',
+        '}',
+        '#btnLogin {',
+        '  background: linear-gradient(135deg, #0284C7 0%, #0D9488 100%) !important; border: none !important;',
+        '  border-radius: 14px !important; height: 52px !important; font-size: 16px !important;',
+        '  font-weight: 700 !important; color: #ffffff !important; margin-top: 18px !important;',
+        '  box-shadow: 0 6px 18px rgba(2, 132, 199, 0.4) !important; width: 100% !important;',
+        '}'
+      ].join('\\n');
+      doc.head.appendChild(st);
+    }
+
+    if (!doc.getElementById('srm_captcha_heading')) {
+      var form = doc.getElementById('login_form');
+      if (form) {
+        var hdr = doc.createElement('div');
+        hdr.id = 'srm_captcha_heading';
+        hdr.innerHTML = '<div style="text-align:center;margin-bottom:14px;">' +
+          '<div style="font-size:11px;font-weight:800;color:#0284C7;letter-spacing:1.5px;text-transform:uppercase;">SRM SECURITY CHECK</div>' +
+          '<div style="font-size:20px;font-weight:800;color:#0F172A;margin-top:2px;">Enter CAPTCHA</div>' +
+          '<div style="font-size:12px;color:#64748B;margin-top:2px;">NetID & Password pre-filled. Enter letters below to log in.</div>' +
+          '</div>';
+        form.insertBefore(hdr, form.firstChild);
+      }
     }
 
     if (capInput && !capInput.value) {
@@ -455,12 +552,14 @@ private enum class Tab(val label: String, val icon: String) {
 fun StudentPortalApp() {
     val ctx = LocalContext.current
     var data by remember { mutableStateOf(Cache.load(ctx)) }
-    var showLogin by remember { mutableStateOf(data == null) }
+    var netId by remember { mutableStateOf(CredStore.getId(ctx)) }
+    var pw by remember { mutableStateOf(CredStore.getPw(ctx)) }
+    var showSetup by remember { mutableStateOf(false) }
     var showWebView by remember { mutableStateOf(false) }
-    var netId by remember { mutableStateOf("") }
-    var pw by remember { mutableStateOf("") }
 
-    if (showWebView) {
+    val hasSavedCreds = CredStore.hasCreds(ctx)
+
+    if (showWebView || (hasSavedCreds && data == null && !showSetup)) {
         AutoLoginWebView(
             netId = netId,
             password = pw,
@@ -468,15 +567,24 @@ fun StudentPortalApp() {
                 Cache.save(ctx, json)
                 data = parsed
                 showWebView = false
-                showLogin = false
             },
-            onCancel = { showWebView = false }
+            onCancel = {
+                showWebView = false
+                if (data == null) showSetup = true
+            },
+            onChangeCreds = {
+                showWebView = false
+                showSetup = true
+            }
         )
-    } else if (showLogin) {
+    } else if (!hasSavedCreds || showSetup) {
         LoginScreen(
+            initialId = netId,
             onLogin = { id, pass ->
+                CredStore.save(ctx, id, pass)
                 netId = id.trim()
                 pw = pass
+                showSetup = false
                 showWebView = true
             }
         )
@@ -487,7 +595,9 @@ fun StudentPortalApp() {
             onSignOut = {
                 Cache.clear(ctx)
                 data = null
-                showLogin = true
+            },
+            onChangeCreds = {
+                showSetup = true
             }
         )
     }
@@ -496,8 +606,11 @@ fun StudentPortalApp() {
 // ─── NATIVE LOGIN SCREEN ────────────────────────────────────────────────────
 
 @Composable
-private fun LoginScreen(onLogin: (String, String) -> Unit) {
-    var id by remember { mutableStateOf("") }
+private fun LoginScreen(
+    initialId: String = "",
+    onLogin: (String, String) -> Unit
+) {
+    var id by remember { mutableStateOf(initialId) }
     var pass by remember { mutableStateOf("") }
 
     Surface(
@@ -534,8 +647,8 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                     }
                     Text("SRM STUDENT PORTAL", color = Color(0xFFB8F3F0), fontSize = 12.sp,
                         fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                    Text("Your campus, at a glance.", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                    Text("Sign in securely to sync your academic dashboard.", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
+                    Text("Credentials Setup", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text("Save your NetID and password once on this device. Future logins will jump straight to the CAPTCHA.", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
 
                     OutlinedTextField(
                         value = id,
@@ -589,11 +702,11 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
                             disabledContentColor = Color.White.copy(alpha = 0.35f)
                         )
                     ) {
-                        Text("Open SRM Portal", fontWeight = FontWeight.Bold)
+                        Text("Save & Open CAPTCHA", fontWeight = FontWeight.Bold)
                     }
 
                     Text(
-                        "The official SRM login page opens next. Your credentials are filled in, and you complete the CAPTCHA before signing in.",
+                        "Your credentials are saved only on your local device. SRM's portal will open directly with the CAPTCHA prompt.",
                         color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp, lineHeight = 16.sp
                     )
                 }
@@ -610,7 +723,8 @@ private fun AutoLoginWebView(
     netId: String,
     password: String,
     onDone: (String, PortalData) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onChangeCreds: () -> Unit = {}
 ) {
     BackHandler { onCancel() }
     var status by remember { mutableStateOf("Opening SRM portal...") }
@@ -652,7 +766,7 @@ private fun AutoLoginWebView(
             .replace("%PW%", JSONObject.quote(password))
         wv?.evaluateJavascript(js, null)
         autoLoginSent = true
-        status = "NetID & Password filled. Enter the CAPTCHA image and tap Login."
+        status = "NetID & Password loaded. Solve CAPTCHA to enter."
     }
 
     fun navigateTo(keyword: String) {
@@ -718,6 +832,9 @@ private fun AutoLoginWebView(
                         color = Color.White, fontSize = 13.sp,
                         modifier = Modifier.weight(1f)
                     )
+                    TextButton(onClick = onChangeCreds) {
+                        Text("Edit NetID", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+                    }
                     TextButton(onClick = onCancel) {
                         Text("Close", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
                     }
@@ -832,7 +949,8 @@ private fun AutoLoginWebView(
 private fun DashboardScaffold(
     data: PortalData,
     onSync: () -> Unit,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onChangeCreds: () -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.Home) }
 
@@ -877,6 +995,9 @@ private fun DashboardScaffold(
                 }
                 TextButton(onClick = onSync) {
                     Text("Sync", color = Teal, fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = onChangeCreds) {
+                    Text("NetID", color = Muted, fontSize = 12.sp)
                 }
                 TextButton(onClick = onSignOut) {
                     Text("Out", color = Muted)
