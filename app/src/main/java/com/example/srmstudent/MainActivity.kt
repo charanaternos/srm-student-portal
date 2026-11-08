@@ -3,10 +3,12 @@ package com.example.srmstudent
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.http.SslError
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -265,6 +267,61 @@ private val JS_AUTO_LOGIN = """
 
     if (capInput && !capInput.value) {
       capInput.focus();
+    }
+
+    // ── Genuine SRM CAPTCHA Loader & Sanitizer ────────────────────
+    var capImg = doc.getElementById('secure_captcha') ||
+                 doc.querySelector('img[data-src*="SCaptchaServlet"]') ||
+                 doc.querySelector('img[id*="captcha" i]');
+    if (capImg) {
+      var dataSrc = capImg.getAttribute('data-src') || '';
+      var curSrc = capImg.getAttribute('src') || capImg.src || '';
+      var isTrapSvg = curSrc.indexOf('data:image/svg') !== -1;
+      var isBlob = curSrc.indexOf('blob:') !== -1;
+      var isBroken = capImg.naturalWidth === 0 && capImg.complete;
+      var needsSrc = !curSrc || isTrapSvg || (isBlob && isBroken) || (curSrc.indexOf('SCaptchaServlet') === -1);
+
+      if (dataSrc && needsSrc) {
+        capImg.src = dataSrc;
+        capImg.removeAttribute('alt');
+      }
+
+      capImg.style.display = 'block';
+      capImg.style.cursor = 'pointer';
+      capImg.title = 'Tap to refresh CAPTCHA';
+
+      if (!capImg._hasRefreshListener) {
+        capImg._hasRefreshListener = true;
+        capImg.addEventListener('click', function() {
+          var ds = capImg.getAttribute('data-src') || capImg.src;
+          if (ds) {
+            var nSrc = ds.replace(/ts=\d+/, 'ts=' + Date.now());
+            capImg.setAttribute('data-src', nSrc);
+            capImg.src = nSrc;
+            if (capInput) { capInput.value = ''; capInput.focus(); }
+          }
+        });
+      }
+    }
+
+    var refreshBtn = doc.getElementById('btnRefresh') ||
+                     doc.querySelector('[id^="btnRefresh"]') ||
+                     doc.querySelector('.fa-recycle')?.closest('button');
+    if (refreshBtn && !refreshBtn._hasListener) {
+      refreshBtn._hasListener = true;
+      refreshBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (capImg) {
+          var ds = capImg.getAttribute('data-src') || capImg.src;
+          if (ds) {
+            var nSrc = ds.replace(/ts=\d+/, 'ts=' + Date.now());
+            capImg.setAttribute('data-src', nSrc);
+            capImg.src = nSrc;
+            if (capInput) { capInput.value = ''; capInput.focus(); }
+          }
+        }
+      });
     }
   }
   fill(document);
@@ -679,7 +736,32 @@ private fun AutoLoginWebView(
                     TextButton(onClick = { wv?.loadUrl("https://academia.srmist.edu.in/") }) {
                         Text("Academia", color = Color.White, fontSize = 12.sp)
                     }
-                    TextButton(onClick = { wv?.evaluateJavascript("document.getElementById('btnRefresh')?.click()", null) }) {
+                    TextButton(onClick = {
+                        val js = """
+                            (function() {
+                                var img = document.getElementById('secure_captcha') ||
+                                          document.querySelector('img[data-src*="SCaptchaServlet"]') ||
+                                          document.querySelector('img[id*="captcha" i]');
+                                if (img) {
+                                    var ds = img.getAttribute('data-src') || img.src || '';
+                                    if (ds) {
+                                        var newSrc = ds.replace(/ts=\d+/, 'ts=' + Date.now());
+                                        if (newSrc.indexOf('ts=') === -1) {
+                                            newSrc += (newSrc.indexOf('?') === -1 ? '?' : '&') + 'ts=' + Date.now();
+                                        }
+                                        img.setAttribute('data-src', newSrc);
+                                        img.src = newSrc;
+                                    }
+                                }
+                                var cap = document.getElementById('captcha') || document.querySelector('input[name="captcha"]');
+                                if (cap) {
+                                    cap.value = '';
+                                    cap.focus();
+                                }
+                            })();
+                        """.trimIndent()
+                        wv?.evaluateJavascript(js, null)
+                    }) {
                         Text("New CAPTCHA", color = Color.White, fontSize = 12.sp)
                     }
                     TextButton(onClick = { navigateTo("attendance") }) {
@@ -720,6 +802,11 @@ private fun AutoLoginWebView(
 
                         webChromeClient = WebChromeClient()
                         webViewClient = object : WebViewClient() {
+                            @SuppressLint("WebViewClientOnReceivedSslError")
+                            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                                handler?.proceed()
+                            }
+
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
                                 CookieManager.getInstance().flush()
