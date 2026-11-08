@@ -260,17 +260,6 @@ private val JS_AUTO_LOGIN = """
       pwInput.dispatchEvent(new Event('change', {bubbles:true}));
     }
 
-    // Fix broken CAPTCHA image using portal SVG generator if image is broken or empty
-    var capImg = doc.getElementById('secure_captcha');
-    if (capImg && (capImg.naturalWidth === 0 || !capImg.src || capImg.src.indexOf('blob:') !== -1)) {
-      if (window.SECURE_CONFIG && window.SECURE_CONFIG.captchaText && typeof createCaptchaImageFromText === 'function') {
-        try {
-          var svg = createCaptchaImageFromText(window.SECURE_CONFIG.captchaText);
-          capImg.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-        } catch(e) {}
-      }
-    }
-
     if (capInput && !capInput.value) {
       capInput.focus();
     }
@@ -557,7 +546,7 @@ private fun AutoLoginWebView(
             .replace("%PW%", JSONObject.quote(password))
         wv?.evaluateJavascript(js, null)
         autoLoginSent = true
-        status = "Credentials sent. If CAPTCHA appears, solve it below."
+        status = "NetID & Password filled. Enter the CAPTCHA image and tap Login."
     }
 
     fun navigateTo(keyword: String) {
@@ -640,6 +629,9 @@ private fun AutoLoginWebView(
                     }
                     TextButton(onClick = { wv?.loadUrl("https://academia.srmist.edu.in/") }) {
                         Text("Academia", color = Color.White, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { wv?.evaluateJavascript("document.getElementById('btnRefresh')?.click()", null) }) {
+                        Text("New CAPTCHA", color = Color.White, fontSize = 12.sp)
                     }
                     TextButton(onClick = { navigateTo("attendance") }) {
                         Text("Attendance", color = Color.White, fontSize = 12.sp)
