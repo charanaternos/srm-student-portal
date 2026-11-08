@@ -17,6 +17,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -28,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -440,14 +442,24 @@ private fun LoginScreen(onLogin: (String, String) -> Unit) {
     var id by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = PageBg) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color.Transparent,
+        tonalElevation = 0.dp
+    ) {
         Box(
-            modifier = Modifier.fillMaxSize().padding(20.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Brush.linearGradient(listOf(Color(0xFF0E2947), Color(0xFF1C5B70))))
+                .padding(20.dp),
             contentAlignment = Alignment.Center
         ) {
             Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(24.dp)),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.12f))
             ) {
                 Column(
                     modifier = Modifier.padding(24.dp),
@@ -701,7 +713,10 @@ private fun DashboardScaffold(
     var tab by remember { mutableStateOf(Tab.Home) }
 
     Scaffold(
-        containerColor = PageBg,
+        containerColor = Color(0xFFF0F4F8),
+        modifier = Modifier.background(
+            Brush.verticalGradient(listOf(Color(0xFFE6F4F4), Color(0xFFF5F7FB)))
+        ),
         bottomBar = {
             NavigationBar(containerColor = Color.White) {
                 Tab.values().forEach { t ->
@@ -720,7 +735,10 @@ private fun DashboardScaffold(
     ) { pad ->
         Column(modifier = Modifier.fillMaxSize().padding(pad)) {
             Row(
-                modifier = Modifier.fillMaxWidth().background(Color.White)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White.copy(alpha = 0.66f))
+                    .border(1.dp, Color.White.copy(alpha = 0.8f))
                     .padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
