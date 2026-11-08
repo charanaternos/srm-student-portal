@@ -11,6 +11,7 @@ import android.webkit.CookieManager
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -45,10 +46,20 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import kotlin.math.roundToInt
 
 private const val SRM_LOGIN_URL =
@@ -375,11 +386,21 @@ private val JS_AUTO_LOGIN = """
       var curSrc = capImg.getAttribute('src') || capImg.src || '';
       var isTrapSvg = curSrc.indexOf('data:image/svg') !== -1;
       var isBlob = curSrc.indexOf('blob:') !== -1;
-      var isBroken = capImg.naturalWidth === 0 && capImg.complete;
-      var needsSrc = !curSrc || isTrapSvg || (isBlob && isBroken) || (curSrc.indexOf('SCaptchaServlet') === -1);
+      var isBroken = capImg.complete && (capImg.naturalWidth === 0 || capImg.naturalHeight === 0);
+      var needsSrc = !curSrc || isTrapSvg || isBroken || (curSrc.indexOf('SCaptchaServlet') === -1);
 
       if (dataSrc && needsSrc) {
-        capImg.src = dataSrc;
+        var nSrc = dataSrc;
+        if (nSrc.indexOf('http') !== 0 && nSrc.indexOf('/') === 0) {
+          nSrc = location.origin + nSrc;
+        }
+        if (nSrc.indexOf('ts=') !== -1) {
+          nSrc = nSrc.replace(/ts=\d+/, 'ts=' + Date.now());
+        } else {
+          nSrc += (nSrc.indexOf('?') === -1 ? '?' : '&') + 'ts=' + Date.now();
+        }
+        capImg.setAttribute('data-src', nSrc);
+        capImg.src = nSrc;
         capImg.removeAttribute('alt');
       }
 
@@ -392,7 +413,7 @@ private val JS_AUTO_LOGIN = """
         capImg.addEventListener('click', function() {
           var ds = capImg.getAttribute('data-src') || capImg.src;
           if (ds) {
-            var nSrc = ds.replace(/ts=\d+/, 'ts=' + Date.now());
+            var nSrc = ds.indexOf('ts=') !== -1 ? ds.replace(/ts=\d+/, 'ts=' + Date.now()) : ds + (ds.indexOf('?') === -1 ? '?' : '&') + 'ts=' + Date.now();
             capImg.setAttribute('data-src', nSrc);
             capImg.src = nSrc;
             if (capInput) { capInput.value = ''; capInput.focus(); }
@@ -412,7 +433,7 @@ private val JS_AUTO_LOGIN = """
         if (capImg) {
           var ds = capImg.getAttribute('data-src') || capImg.src;
           if (ds) {
-            var nSrc = ds.replace(/ts=\d+/, 'ts=' + Date.now());
+            var nSrc = ds.indexOf('ts=') !== -1 ? ds.replace(/ts=\d+/, 'ts=' + Date.now()) : ds + (ds.indexOf('?') === -1 ? '?' : '&') + 'ts=' + Date.now();
             capImg.setAttribute('data-src', nSrc);
             capImg.src = nSrc;
             if (capInput) { capInput.value = ''; capInput.focus(); }
@@ -715,6 +736,80 @@ private fun LoginScreen(
     }
 }
 
+// ─── CAPTCHA NETWORK INTERCEPTOR ───────────────────────────────────────────
+
+private fun fetchCaptchaStream(urlStr: String, userAgent: String?): WebResourceResponse? {
+    return try {
+        val targetUrl = if (urlStr.startsWith("/")) {
+            "https://sp.srmist.edu.in$urlStr"
+        } else {
+            urlStr
+        }
+        val url = URL(targetUrl)
+        val conn = (url.openConnection() as? HttpsURLConnection) ?: (url.openConnection() as HttpURLConnection)
+
+        if (conn is HttpsURLConnection) {
+            val trustAllCerts = arrayOf<TrustManager>(@SuppressLint("CustomX509TrustManager") object : X509TrustManager {
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            })
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, trustAllCerts, SecureRandom())
+            conn.sslSocketFactory = sslContext.socketFactory
+            conn.hostnameVerifier = HostnameVerifier { _, _ -> true }
+        }
+
+        conn.connectTimeout = 10000
+        conn.readTimeout = 10000
+        conn.instanceFollowRedirects = true
+        conn.useCaches = false
+
+        val ua = userAgent?.takeIf { it.isNotBlank() }
+            ?: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        conn.setRequestProperty("User-Agent", ua)
+        conn.setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        conn.setRequestProperty("Referer", SRM_LOGIN_URL)
+        conn.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+
+        // CRITICAL: We deliberately omit X-Requested-With and X-Domain-Proof headers.
+        // SRM WAF / Apache server immediately rejects SCaptchaServlet with HTTP 403 if X-Requested-With is present.
+
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.flush()
+        val cookies = cookieManager.getCookie(targetUrl) ?: cookieManager.getCookie(SRM_LOGIN_URL)
+        if (!cookies.isNullOrBlank()) {
+            conn.setRequestProperty("Cookie", cookies)
+        }
+
+        conn.connect()
+        val code = conn.responseCode
+        if (code in 200..299) {
+            conn.headerFields["Set-Cookie"]?.forEach { cookieHeader ->
+                cookieManager.setCookie(targetUrl, cookieHeader)
+            }
+            val mimeType = conn.contentType?.split(";")?.firstOrNull()?.trim() ?: "image/png"
+            val encoding = conn.contentEncoding ?: "UTF-8"
+            val bytes = conn.inputStream.use { it.readBytes() }
+            if (bytes.isNotEmpty()) {
+                Log.d("SRMCaptcha", "SCaptchaServlet intercepted successfully: ${bytes.size} bytes loaded")
+                WebResourceResponse(mimeType, encoding, ByteArrayInputStream(bytes))
+            } else {
+                Log.w("SRMCaptcha", "SCaptchaServlet returned 0 bytes")
+                null
+            }
+        } else {
+            Log.w("SRMCaptcha", "SCaptchaServlet HTTP $code: ${conn.responseMessage}")
+            null
+        }
+    } catch (e: Exception) {
+        Log.e("SRMCaptcha", "Failed to intercept SCaptchaServlet", e)
+        null
+    }
+}
+
 // ─── AUTO-LOGIN WEBVIEW ─────────────────────────────────────────────────────
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -922,6 +1017,27 @@ private fun AutoLoginWebView(
                             @SuppressLint("WebViewClientOnReceivedSslError")
                             override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
                                 handler?.proceed()
+                            }
+
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): WebResourceResponse? {
+                                if (request == null) return null
+                                val urlStr = request.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+                                if (urlStr.contains("SCaptchaServlet", ignoreCase = true)) {
+                                    val ua = request.requestHeaders?.entries?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+                                    val intercepted = fetchCaptchaStream(urlStr, ua)
+                                    if (intercepted != null) return intercepted
+                                }
+                                return super.shouldInterceptRequest(view, request)
+                            }
+
+                            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                super.onPageCommitVisible(view, url)
+                                if (url?.contains("srmist.edu.in") == true) {
+                                    sendAutoLogin()
+                                }
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
