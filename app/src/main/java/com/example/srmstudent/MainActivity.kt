@@ -260,13 +260,19 @@ private val JS_AUTO_LOGIN = """
       pwInput.dispatchEvent(new Event('change', {bubbles:true}));
     }
 
-    if (capInput) {
-      if (!capInput.value) {
-        capInput.focus();
-      } else if (capInput.value.length >= 4) {
-        var btn = doc.querySelector('#btnLogin, button[type="submit"], input[type="submit"]');
-        if (btn && !btn.disabled) btn.click();
+    // Fix broken CAPTCHA image using portal SVG generator if image is broken or empty
+    var capImg = doc.getElementById('secure_captcha');
+    if (capImg && (capImg.naturalWidth === 0 || !capImg.src || capImg.src.indexOf('blob:') !== -1)) {
+      if (window.SECURE_CONFIG && window.SECURE_CONFIG.captchaText && typeof createCaptchaImageFromText === 'function') {
+        try {
+          var svg = createCaptchaImageFromText(window.SECURE_CONFIG.captchaText);
+          capImg.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        } catch(e) {}
       }
+    }
+
+    if (capInput && !capInput.value) {
+      capInput.focus();
     }
   }
   fill(document);
@@ -577,9 +583,9 @@ private fun AutoLoginWebView(
         val w = wv ?: return@LaunchedEffect
         var tick = 0
         while (true) {
-            delay(2000)
+            delay(1500)
             tick++
-            if (!autoLoginSent && tick >= 2) {
+            if (!logged) {
                 sendAutoLogin()
             }
             extract()
@@ -593,6 +599,9 @@ private fun AutoLoginWebView(
                 if (tick % 3 == 0) {
                     navigateTo("time table")
                 }
+            }
+            if (logged && attC > 0 && clsC > 0 && tick % 4 == 0) {
+                saveAndFinish()
             }
         }
     }
@@ -658,11 +667,15 @@ private fun AutoLoginWebView(
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.allowFileAccess = true
+                        settings.allowContentAccess = true
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
                         settings.setSupportZoom(true)
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
 
                         webChromeClient = WebChromeClient()
                         webViewClient = object : WebViewClient() {
